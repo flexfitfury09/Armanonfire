@@ -20,6 +20,13 @@ from sklearn.inspection import PartialDependenceDisplay
 # --- Page Configuration ---
 st.set_page_config(page_title="Definitive AutoML Toolkit", page_icon="✅", layout="wide")
 
+# --- CORE FIX: Re-inserting the missing function ---
+@st.cache_data
+def load_data(file):
+    """Loads data from an uploaded file."""
+    return pd.read_csv(file, encoding='utf-8')
+# ----------------------------------------------------
+
 # --- Session State ---
 st.session_state.setdefault('analysis_complete', False)
 st.session_state.setdefault('results', {})

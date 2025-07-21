@@ -28,80 +28,84 @@ st.session_state.setdefault('results', {})
 # --- Main Analysis Pipeline Function ---
 def run_analysis_pipeline(df, config):
     results = {}
-    target_column = config['target_column']
+    target_column = config.get('target_column')
     task = config['task']
     
     # --- EDA ---
-    profile = ProfileReport(df, title=f"Automated EDA Report", explorative=True)
-    results['eda_report'] = profile
+    with st.spinner("Generating deep data profile..."):
+        profile = ProfileReport(df, title="Automated EDA Report", explorative=True, minimal=True)
+        results['eda_report'] = profile
 
     # --- Preprocessing ---
-    if task in ["Regression", "Classification"]:
-        y = df[target_column].copy()
-        X = df.drop(columns=[target_column]).copy()
+    with st.spinner("Cleaning and preparing data..."):
+        if task in ["Regression", "Classification"]:
+            y = df[target_column].copy()
+            X = df.drop(columns=[target_column]).copy()
 
-        if task == "Classification":
-            le = LabelEncoder()
-            y = le.fit_transform(y.astype(str))
-            results['label_encoder'] = le
-    else: # Clustering
-        X = df.copy()
-        y = None
+            if task == "Classification":
+                le = LabelEncoder()
+                y = le.fit_transform(y.astype(str))
+                results['label_encoder'] = le
+        else: # Clustering
+            X = df.copy()
+            y = None
 
-    for col in X.columns:
-        if X[col].dtype == 'object' or X[col].dtype.name == 'category':
-            X[col] = X[col].astype(str)
-            imputer = SimpleImputer(strategy='most_frequent')
-            X[col] = imputer.fit_transform(X[[col]]).flatten()
-            X[col] = LabelEncoder().fit_transform(X[col])
-        else:
-            imputer = SimpleImputer(strategy='median')
-            X[col] = imputer.fit_transform(X[[col]]).flatten()
-    
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    results['scaler'] = scaler
-    results['features'] = X.columns.tolist()
-    results['cleaned_data'] = pd.DataFrame(X_scaled, columns=X.columns)
-    if y is not None:
-        results['cleaned_data'][target_column] = y
+        for col in X.columns:
+            if X[col].dtype == 'object' or X[col].dtype.name == 'category':
+                X[col] = X[col].astype(str)
+                imputer = SimpleImputer(strategy='most_frequent')
+                X[col] = imputer.fit_transform(X[[col]]).flatten()
+                X[col] = LabelEncoder().fit_transform(X[col])
+            else:
+                imputer = SimpleImputer(strategy='median')
+                X[col] = imputer.fit_transform(X[[col]]).flatten()
+        
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
+        results['scaler'] = scaler
+        results['features'] = X.columns.tolist()
+        results['cleaned_data'] = pd.DataFrame(X_scaled, columns=X.columns)
+        if y is not None:
+            results['cleaned_data'][target_column] = y
 
     # --- Model Training ---
-    if task in ["Regression", "Classification"]:
-        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-        
-        models = {
-            "RandomForest": RandomForestRegressor() if task == "Regression" else RandomForestClassifier(),
-            "XGBoost": XGBRegressor() if task == "Regression" else XGBClassifier(),
-            "LightGBM": LGBMRegressor() if task == "Regression" else LGBMClassifier()
-        }
-        
-        leaderboard = {}
-        for name, model in models.items():
-            model.fit(X_train, y_train)
-            preds = model.predict(X_test)
-            score = r2_score(y_test, preds) if task == "Regression" else accuracy_score(y_test, preds)
-            leaderboard[name] = score
-        
-        results['leaderboard'] = pd.DataFrame(list(leaderboard.items()), columns=['Model', 'Score']).sort_values('Score', ascending=False).reset_index(drop=True)
-        best_model_name = results['leaderboard']['Model'].iloc[0]
-        best_model = models[best_model_name].fit(X_train, y_train)
+    with st.spinner("Training and competing models..."):
+        if task in ["Regression", "Classification"]:
+            X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
+            
+            models = {
+                "RandomForest": RandomForestRegressor(random_state=42) if task == "Regression" else RandomForestClassifier(random_state=42),
+                "XGBoost": XGBRegressor(random_state=42) if task == "Regression" else XGBClassifier(random_state=42),
+                "LightGBM": LGBMRegressor(random_state=42) if task == "Regression" else LGBMClassifier(random_state=42)
+            }
+            
+            leaderboard = {}
+            for name, model in models.items():
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+                score = r2_score(y_test, preds) if task == "Regression" else accuracy_score(y_test, preds)
+                leaderboard[name] = score
+            
+            results['leaderboard'] = pd.DataFrame(list(leaderboard.items()), columns=['Model', 'Score']).sort_values('Score', ascending=False).reset_index(drop=True)
+            best_model_name = results['leaderboard']['Model'].iloc[0]
+            best_model = models[best_model_name].fit(X_train, y_train)
 
-        results.update({"best_model": best_model, "X_test_df": pd.DataFrame(X_test, columns=X.columns), "y_test": y_test})
+            results.update({"best_model": best_model, "X_test_df": pd.DataFrame(X_test, columns=X.columns), "y_test": y_test, "X_train": X_train})
 
-        # --- Explainability ---
-        explainer = shap.Explainer(best_model, X_train)
-        shap_values = explainer(X_test)
-        results.update({"explainer": explainer, "shap_values": shap_values})
+            # --- Explainability ---
+            with st.spinner("Generating advanced explanations..."):
+                explainer = shap.Explainer(best_model, X_train)
+                shap_values = explainer(X_test)
+                results.update({"explainer": explainer, "shap_values": shap_values})
 
-    elif task == "Clustering":
-        kmeans = KMeans(n_clusters=config['n_clusters'], random_state=42, n_init='auto')
-        clusters = kmeans.fit_predict(X_scaled)
-        results['model'] = kmeans
-        results['clusters'] = clusters
-        df['cluster'] = clusters
-        results['clustered_data'] = df
-        
+    if task == "Clustering":
+        with st.spinner("Finding optimal clusters..."):
+            kmeans = KMeans(n_clusters=config['n_clusters'], random_state=42, n_init='auto')
+            clusters = kmeans.fit_predict(X_scaled)
+            results['model'] = kmeans
+            df['cluster'] = clusters
+            results['clustered_data'] = df
+            
     return results
 
 # --- UI Sidebar ---
@@ -123,10 +127,8 @@ with st.sidebar:
 
         if st.button("🚀 LAUNCH ANALYSIS", use_container_width=True, type="primary"):
             st.session_state.analysis_complete = False
-            with st.spinner("Executing a full, robust analysis... Please wait."):
-                st.session_state.results = run_analysis_pipeline(df, config)
-                st.session_state.analysis_complete = True
-            st.success("Analysis Complete!")
+            st.session_state.results = run_analysis_pipeline(df, config)
+            st.session_state.analysis_complete = True
             st.rerun()
 
 # --- Main Page Display ---
@@ -167,7 +169,7 @@ else:
             st.subheader("Partial Dependence Plots (How a feature affects predictions)")
             feature = st.selectbox("Select a feature to analyze:", res['features'])
             pdp_fig, ax = plt.subplots()
-            PartialDependenceDisplay.from_estimator(res['best_model'], res['X_test_df'], [feature], ax=ax)
+            PartialDependenceDisplay.from_estimator(res['best_model'], res['X_train'], [res['features'].index(feature)], feature_names=res['features'], ax=ax)
             st.pyplot(pdp_fig)
 
         with tabs[3]:

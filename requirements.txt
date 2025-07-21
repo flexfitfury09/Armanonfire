@@ -8,4 +8,5 @@ joblib==1.4.2
 shap==0.45.1
 xgboost==2.0.3
 lightgbm==4.3.0
-pandas-profiling==3.6.6
+ydata-profiling==4.6.4
+streamlit-pandas-profiling==0.1.3

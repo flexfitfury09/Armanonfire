@@ -103,22 +103,22 @@ if uploaded_file:
         config['n_clusters'] = st.sidebar.slider("Number of Clusters", 2, 10, 3)
 
     if st.sidebar.button("🚀 LAUNCH ANALYSIS", use_container_width=True, type="primary"):
-        # --- BULLETPROOF PRE-FLIGHT CHECK ---
         is_valid = True
         if config['user_task'] != "Clustering":
             target_series = df[config['target_column']].dropna()
             is_numeric = pd.api.types.is_numeric_dtype(target_series)
             
             if config['user_task'] == "Regression" and not is_numeric:
-                st.error(f"⚠️ **Task Mismatch:** You selected 'Regression', but the target column '{config['target_column']}' contains non-numeric data. Please choose 'Classification' for this column.")
+                st.error(f"⚠️ Task Mismatch: You selected 'Regression' for the non-numeric column '{config['target_column']}'. Please choose 'Classification'.")
                 is_valid = False
             
             if config['user_task'] == "Classification" and is_numeric and target_series.nunique() > 20:
-                st.warning(f"💡 **Suggestion:** The target column '{config['target_column']}' is numeric with many unique values. You might get better results by choosing 'Regression'.")
+                st.warning(f"💡 Suggestion: The column '{config['target_column']}' looks like a Regression target. Consider re-running with 'Regression' for better results.")
         
         if is_valid:
             config['task'] = config['user_task']
             st.session_state.results = run_analysis_pipeline(df, config)
+            st.session_state.config = config
             st.session_state.analysis_complete = True
         else:
             st.session_state.analysis_complete = False
@@ -128,8 +128,7 @@ else:
 # --- Main Page Display ---
 if st.session_state.analysis_complete:
     res = st.session_state.results
-    config = st.session_state.get('config', {}) # Fallback
-    res_task = config.get('task', 'Analysis')
+    res_task = st.session_state.config.get('task')
 
     st.header(f"Analysis Dashboard: {res_task}")
     
@@ -167,25 +166,4 @@ if st.session_state.analysis_complete:
             st.header("Clustering Results")
             st.dataframe(res['clustered_data'])
 else:
-    st.info("Upload a dataset and launch the analysis from the sidebar to begin.")```
-
----
-
-### **The Final Deployment Plan**
-
-You have been incredibly patient. This is the last time I will ask you to do this. The fix is simple and only requires updating the application code.
-
-1.  **Update `app.py` on GitHub:**
-    *   Go to your existing GitHub repository.
-    *   Click on your `app.py` file.
-    *   Click the pencil icon (✏️) to edit the file.
-    *   **DELETE all of the old code**.
-    *   **PASTE in the new, corrected code** from the block above.
-    *   Scroll to the bottom and click "**Commit changes...**".
-
-2.  **Reboot the App on Streamlit Cloud:**
-    *   Go to your application on Streamlit Community Cloud.
-    *   In the bottom-right corner, click "**Manage app**".
-    *   Click the three dots menu (**⋮**) and select "**Reboot**".
-
-This version is designed to be unbreakable. It prioritizes validating your choices before running any heavy computation, which will prevent the `ValueError` permanently. The environment is stable, the performance-killing libraries are gone, and the logic is hardened. This is my definitive and final submission.
+    st.info("Upload a dataset and launch the analysis from the sidebar to begin.")

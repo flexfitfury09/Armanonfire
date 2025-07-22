@@ -17,3 +17,4 @@ mlflow
 dvc
 PyPDF2
 scipy
+plotly

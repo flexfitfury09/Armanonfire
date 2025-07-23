@@ -1,248 +1,416 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler, PolynomialFeatures
+from sklearn.metrics import mean_squared_error, r2_score, accuracy_score, classification_report, mean_absolute_error
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
+from sklearn.multioutput import MultiOutputRegressor
 import joblib
-from io import BytesIO
-
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import (classification_report, confusion_matrix, accuracy_score,
-                             mean_squared_error, mean_absolute_error, r2_score)
-
-from sklearn.linear_model import LogisticRegression, LinearRegression, SGDClassifier
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.naive_bayes import GaussianNB
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC, SVR
-
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
-from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-from sklearn.semi_supervised import LabelPropagation, LabelSpreading, SelfTrainingClassifier
-
 import shap
 import lime
 import lime.lime_tabular
+import io
+import os
+import threading
+import uvicorn
+from fastapi import FastAPI
+from pydantic import BaseModel
+from typing import List, Optional
 
-import plotly.express as px
-import matplotlib.pyplot as plt
-
-# Deep learning import with safe fallback
-try:
+# Delayed TensorFlow import to avoid startup lag
+def import_tf():
+    global tf
     import tensorflow as tf
-    from tensorflow.keras import Sequential
-    from tensorflow.keras.layers import Dense, Conv2D, Flatten, LSTM, Reshape
-    TF_AVAILABLE = True
-except Exception as e:
-    TF_AVAILABLE = False
-    tf_error_msg = str(e)
+    return tf
 
-st.set_page_config(page_title="Advanced AutoML App", layout="wide")
-st.title("🤖 AutoML + Regression + DL + Explainability Toolbox")
+# --- FastAPI app for model serving ---
+api = FastAPI()
+model_storage = {}  # dict to hold models in memory keyed by 'model_name'
 
-# File upload
-uploaded_file = st.sidebar.file_uploader("📁 Upload CSV dataset", type="csv")
+class PredictRequest(BaseModel):
+    features: List[float]
+    model_name: Optional[str] = "default"
 
-@st.cache_data
-def load_data(file):
-    return pd.read_csv(file)
-
-def clean_data(df):
-    df = df.dropna(axis=1, how="all").drop_duplicates()
-    for c in df.select_dtypes('object'):
-        if df[c].nunique() < df.shape[0]*0.5:
-            df[c].fillna(df[c].mode()[0], inplace=True)
+@api.post("/predict")
+def predict(request: PredictRequest):
+    model_name = request.model_name
+    if model_name not in model_storage:
+        return {"error": f"Model '{model_name}' not loaded."}
+    model = model_storage[model_name]
+    try:
+        x = np.array(request.features).reshape(1, -1)
+        # TF model detection
+        if hasattr(model, 'predict') and hasattr(model, 'save'):
+            # keras model
+            pred = model.predict(x).flatten().tolist()
         else:
-            df.drop(columns=[c], inplace=True)
-    df.fillna(df.mean(numeric_only=True), inplace=True)
-    return df
+            pred = model.predict(x).tolist()
+        return {"prediction": pred}
+    except Exception as e:
+        return {"error": str(e)}
 
-# Main logic
-if uploaded_file:
-    df = load_data(uploaded_file)
-    st.subheader("🔍 Raw Dataset")
-    st.dataframe(df)
-    df = clean_data(df)
-    st.subheader("🧹 Cleaned Dataset")
-    st.dataframe(df)
+def run_api():
+    uvicorn.run(api, host="0.0.0.0", port=8000)
 
-    # EDA
-    st.subheader("📊 Automated EDA")
-    st.write("Shape:", df.shape)
-    st.write(df.dtypes)
-    st.write(df.isna().sum())
-    fig, axes = plt.subplots(1, min(5, df.select_dtypes('number').shape[1]), figsize=(15,3))
-    for ax, col in zip(axes, df.select_dtypes('number').columns[:5]):
-        df[col].hist(ax=ax); ax.set_title(col)
-    st.pyplot(fig)
+# --- Streamlit App ---
+pd.options.mode.chained_assignment = None
 
-    # Multi-target selection
-    all_cols = df.columns.tolist()
-    targets = st.multiselect("Select Target Column(s)", all_cols)
-    if not targets:
-        st.warning("Please select at least one target column.")
-        st.stop()
+st.set_page_config(page_title="Advanced ML & DL + API Serving App", layout='wide')
+st.title("🧠 ML + DL + Explainability + Model Saving + FastAPI Serving")
 
-    X = df.drop(columns=targets)
-    y = df[targets]
+uploaded_file = st.file_uploader("Upload CSV dataset", type=["csv"])
 
-    # Label-encode objects
-    for c in X.select_dtypes('object').columns:
-        X[c] = LabelEncoder().fit_transform(X[c])
-    # Multi-output regression only numeric, but classification handles single target
-    is_regression = y.shape[1] > 1 or np.issubdtype(y.dtypes[0], np.number)
+if uploaded_file is not None:
+    data = pd.read_csv(uploaded_file)
+    st.write("### Data Preview")
+    st.dataframe(data.head())
 
-    if is_regression and y.shape[1] == 1 and y[targets[0]].nunique() <= 20:
-        # single numeric target but few distinct => classification
-        is_regression = False
+    if st.checkbox("Show Dataset Info"):
+        buffer = io.StringIO()
+        data.info(buf=buffer)
+        st.text(buffer.getvalue())
 
-    # Encode classification target
-    if not is_regression:
-        y = LabelEncoder().fit_transform(y[targets[0]].values)
+    if st.checkbox("Show Summary Statistics"):
+        st.write(data.describe())
+
+    if st.checkbox("Show Correlation Heatmap"):
+        fig, ax = plt.subplots()
+        sns.heatmap(data.corr(), annot=True, cmap="coolwarm", ax=ax)
+        st.pyplot(fig)
+
+    # Select target & task
+    target_column = st.selectbox("Select Target Variable", options=data.columns)
+
+    task = st.selectbox("Select Task", options=[
+        "Regression",
+        "Polynomial Regression",
+        "Classification",
+        "Multi-output Regression",
+        "Deep Learning (MLP)",
+        "Deep Learning (CNN - for images)",
+        "Deep Learning (RNN - for sequences)"
+    ])
+
+    features = data.drop(columns=[target_column])
+
+    if task == "Classification" and data[target_column].dtype == "object":
+        le = LabelEncoder()
+        data[target_column] = le.fit_transform(data[target_column])
+
+    if task == "Multi-output Regression":
+        target_columns = st.text_input("Enter comma separated target columns for multi-output regression", value=target_column)
+        target_columns_list = [x.strip() for x in target_columns.split(",") if x.strip() in data.columns]
+        if len(target_columns_list) < 2:
+            st.error("Please select at least two valid target columns for multi-output regression.")
+        else:
+            target_column = target_columns_list
+
+    numeric_features = features.select_dtypes(include=np.number).columns.tolist()
+    categorical_features = features.select_dtypes(exclude=np.number).columns.tolist()
+
+    if categorical_features:
+        for cat_col in categorical_features:
+            features[cat_col] = features[cat_col].astype("category").cat.codes
 
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-    X_train, X_test, y_train, y_test = train_test_split(X_scaled, y.values, test_size=0.3, random_state=42)
+    features_scaled = pd.DataFrame(scaler.fit_transform(features[numeric_features]), columns=numeric_features)
+    if categorical_features:
+        features_scaled = pd.concat([features_scaled, features[categorical_features]], axis=1)
 
-    # Choose model
-    algo = st.sidebar.selectbox("🔍 Select Algorithm",
-        ["Logistic Regression","Decision Tree","Random Forest","Naive Bayes","KNN","SVM",
-         "Linear Regression","Decision Tree Regressor","RandomForestRegressor","SVR",
-         "KMeans","DBSCAN","Hierarchical Clustering","PCA","t-SNE",
-         "Label Propagation","Label Spreading","Self Training"]
-    )
+    if task != "Multi-output Regression":
+        X_train, X_test, y_train, y_test = train_test_split(features_scaled, data[target_column], test_size=0.2, random_state=42)
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(features_scaled, data[target_column], test_size=0.2, random_state=42)
 
-    model, show_perf = None, False
+    model = None
+    model_name = "default"
 
-    # Supervised/semi-supervised
-    if algo in ["Logistic Regression","Decision Tree","Random Forest","Naive Bayes","KNN","SVM",
-                "Linear Regression","Decision Tree Regressor","RandomForestRegressor","SVR",
-                "Label Propagation","Label Spreading","Self Training"]:
-        if algo=="Logistic Regression":
-            model = LogisticRegression()
-        elif algo=="Decision Tree":
-            model = DecisionTreeClassifier()
-        elif algo=="Random Forest":
-            model = RandomForestClassifier()
-        elif algo=="Naive Bayes":
-            model = GaussianNB()
-        elif algo=="KNN":
-            model = KNeighborsClassifier()
-        elif algo=="SVM":
-            model = SVC(probability=True)
-        elif algo=="Linear Regression":
+    # --- MODEL TRAINING ---
+
+    if task == "Regression":
+        model_type = st.selectbox("Select Regression Model", options=["Linear Regression", "Random Forest Regressor"])
+        if model_type == "Linear Regression":
             model = LinearRegression()
-        elif algo=="Decision Tree Regressor":
-            model = DecisionTreeRegressor()
-        elif algo=="RandomForestRegressor":
-            model = RandomForestRegressor()
-        elif algo=="SVR":
-            model = SVR()
-        elif algo=="Label Propagation":
-            model = LabelPropagation()
-        elif algo=="Label Spreading":
-            model = LabelSpreading()
-        elif algo=="Self Training":
-            model = SelfTrainingClassifier(SGDClassifier())
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+        else:
+            model = RandomForestRegressor(random_state=42)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
 
+        st.write(f"R2 Score: {r2_score(y_test, preds):.4f}")
+        st.write(f"RMSE: {mean_squared_error(y_test, preds, squared=False):.4f}")
+        st.write(f"MAE: {mean_absolute_error(y_test, preds):.4f}")
+        epsilon = 1e-10
+        mape = np.mean(np.abs((y_test - preds) / (y_test + epsilon))) * 100
+        st.write(f"MAPE (%): {mape:.2f}")
+
+        fig, ax = plt.subplots()
+        ax.scatter(y_test, preds, alpha=0.7)
+        ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+        ax.set_xlabel("True Values")
+        ax.set_ylabel("Predictions")
+        ax.set_title("True vs Predicted")
+        st.pyplot(fig)
+
+    elif task == "Polynomial Regression":
+        degree = st.slider("Polynomial Degree", min_value=2, max_value=5, value=2)
+        poly = PolynomialFeatures(degree=degree)
+        X_train_poly = poly.fit_transform(X_train)
+        X_test_poly = poly.transform(X_test)
+
+        model = LinearRegression()
+        model.fit(X_train_poly, y_train)
+        preds = model.predict(X_test_poly)
+
+        st.write(f"Polynomial Degree: {degree}")
+        st.write(f"R2 Score: {r2_score(y_test, preds):.4f}")
+        st.write(f"RMSE: {mean_squared_error(y_test, preds, squared=False):.4f}")
+        st.write(f"MAE: {mean_absolute_error(y_test, preds):.4f}")
+        epsilon = 1e-10
+        mape = np.mean(np.abs((y_test - preds) / (y_test + epsilon))) * 100
+        st.write(f"MAPE (%): {mape:.2f}")
+
+        fig, ax = plt.subplots()
+        ax.scatter(y_test, preds, alpha=0.7)
+        ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
+        ax.set_xlabel("True Values")
+        ax.set_ylabel("Predictions")
+        ax.set_title("Polynomial Regression True vs Predicted")
+        st.pyplot(fig)
+
+    elif task == "Classification":
+        model_type = st.selectbox("Select Classification Model", options=["Logistic Regression", "Random Forest Classifier"])
+        if model_type == "Logistic Regression":
+            model = LogisticRegression(max_iter=200)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+        else:
+            model = RandomForestClassifier(random_state=42)
+            model.fit(X_train, y_train)
+            preds = model.predict(X_test)
+
+        st.write(f"Accuracy: {accuracy_score(y_test, preds):.4f}")
+        st.text(classification_report(y_test, preds))
+
+    elif task == "Multi-output Regression":
+        model_type = st.selectbox("Select Model for Multi-output Regression", options=["Random Forest Regressor", "Linear Regression"])
+        if model_type == "Random Forest Regressor":
+            base_model = RandomForestRegressor(random_state=42)
+        else:
+            base_model = LinearRegression()
+        model = MultiOutputRegressor(base_model)
         model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        show_perf = True
+        preds = model.predict(X_test)
+        r2s = [r2_score(y_test.iloc[:, i], preds[:, i]) for i in range(len(target_column))]
+        rmses = [mean_squared_error(y_test.iloc[:, i], preds[:, i], squared=False) for i in range(len(target_column))]
+        st.write("R2 Scores for each output:")
+        for i, col in enumerate(target_column):
+            st.write(f"{col}: {r2s[i]:.4f}")
+        st.write("RMSE for each output:")
+        for i, col in enumerate(target_column):
+            st.write(f"{col}: {rmses[i]:.4f}")
 
-    # Unsupervised and dimension reduction
-    elif algo=="KMeans":
-        clusters = KMeans(n_clusters=3).fit_predict(X_scaled)
-        fig = px.scatter(pd.DataFrame(X_scaled, columns=X.columns), x=X.columns[0],y=X.columns[1],color=clusters, title="KMeans")
-        st.plotly_chart(fig)
-    elif algo=="DBSCAN":
-        st.write(set(DBSCAN().fit_predict(X_scaled)))
-    elif algo=="Hierarchical Clustering":
-        st.write(set(AgglomerativeClustering(n_clusters=3).fit_predict(X_scaled)))
-    elif algo=="PCA":
-        pcs = PCA(n_components=2).fit_transform(X_scaled)
-        st.plotly_chart(px.scatter(x=pcs[:,0],y=pcs[:,1], title="PCA"))
-    elif algo=="t-SNE":
-        ts = TSNE(n_components=2).fit_transform(X_scaled)
-        st.plotly_chart(px.scatter(x=ts[:,0],y=ts[:,1], title="t-SNE"))
+    elif task.startswith("Deep Learning"):
+        tf = import_tf()
+        from tensorflow.keras.models import Sequential
+        from tensorflow.keras.layers import Dense, Conv2D, Flatten, MaxPooling2D, LSTM, Embedding, Dropout
+        from tensorflow.keras.utils import to_categorical
+        import tensorflow.keras.backend as K
 
-    # Display performance & metrics
-    if show_perf:
-        st.subheader("📊 Performance Metrics")
-        if is_regression:
-            if y_train.ndim > 1:
-                # Multi-output regression
-                mse = mean_squared_error(y_test, y_pred, multioutput='raw_values')
-                st.write("MSE per target:", mse)
+        # Prepare data for DL:
+        if task == "Deep Learning (MLP)":
+            # MLP for tabular data
+            if task == "Classification":
+                n_classes = len(np.unique(y_train))
+                y_train_dl = to_categorical(y_train, num_classes=n_classes)
+                y_test_dl = to_categorical(y_test, num_classes=n_classes)
             else:
-                st.write("MAE:", mean_absolute_error(y_test, y_pred))
-                st.write("MSE:", mean_squared_error(y_test, y_pred))
-                st.write("R²:", r2_score(y_test, y_pred))
-        else:
-            st.write("Accuracy:", accuracy_score(y_test, y_pred))
-            st.dataframe(confusion_matrix(y_test, y_pred))
-            st.text(classification_report(y_test, y_pred))
+                y_train_dl = y_train
+                y_test_dl = y_test
 
-        st.write("Cross‑val score:", cross_val_score(model, X_scaled, y_train, cv=5))
+            model = Sequential([
+                Dense(128, activation='relu', input_shape=(X_train.shape[1],)),
+                Dropout(0.2),
+                Dense(64, activation='relu'),
+                Dropout(0.2),
+                Dense(n_classes if task=="Classification" else 1, activation='softmax' if task=="Classification" else 'linear')
+            ])
 
-        # Save model
-        joblib.dump(model, "model.pkl")
-        st.download_button("⬇️ Download Model", open("model.pkl","rb"), file_name="model.pkl")
+            model.compile(optimizer='adam',
+                          loss='categorical_crossentropy' if task=="Classification" else 'mse',
+                          metrics=['accuracy'] if task=="Classification" else ['mse'])
 
-        # Explainability
-        if not is_regression and algo in ["Random Forest", "Decision Tree"]:
-            expl = shap.TreeExplainer(model)
-            vals = expl.shap_values(X_test)
-            shap.summary_plot(vals, X_test, feature_names=X.columns, show=False)
-            st.pyplot(bbox_inches='tight')
-        elif not is_regression:
-            expl = lime.lime_tabular.LimeTabularExplainer(X_train, feature_names=X.columns,
-                                                          class_names=[str(c) for c in np.unique(y_train)],
-                                                          discretize_continuous=True)
-            i= np.random.randint(X_test.shape[0])
-            exp = expl.explain_instance(X_test[i], model.predict_proba if hasattr(model,"predict_proba") else model.predict, 
-                                        num_features=5)
-            st.components.v1.html(exp.as_html(), height=350)
+            model.fit(X_train, y_train_dl, epochs=20, batch_size=32, verbose=0)
+            preds_prob = model.predict(X_test)
+            if task == "Classification":
+                preds = preds_prob.argmax(axis=1)
+                st.write(f"Accuracy: {accuracy_score(y_test, preds):.4f}")
+                st.text(classification_report(y_test, preds))
+            else:
+                preds = preds_prob.flatten()
+                st.write(f"R2 Score: {r2_score(y_test, preds):.4f}")
+                st.write(f"RMSE: {mean_squared_error(y_test, preds, squared=False):.4f}")
 
-    # Deep learning demos
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🧠 Deep Learning Demo")
-    dl_mode = st.sidebar.selectbox("DL Demo", ["None", 
-                                               is_regression and "DL Regression Toy" or None,
-                                               not is_regression and "CNN Toy",
-                                               not is_regression and "RNN Toy"])
-    if dl_mode and dl_mode!="None":
-        if not TF_AVAILABLE:
-            st.error("TensorFlow unavailable.\n" + tf_error_msg)
-        else:
-            st.success("Running " + dl_mode)
-            if dl_mode=="CNN Toy":
-                Xc = X_scaled[:, :10].reshape(-1,2,5,1)
-                yc = tf.keras.utils.to_categorical(y_train if not is_regression else y_train)
-                model_dl = Sequential([
-                    Conv2D(8,(2,2),activation='relu',input_shape=(2,5,1)),
+        elif task == "Deep Learning (CNN - for images)":
+            st.info("Expecting image data in shape (samples, height, width, channels). Your CSV must have flattened images or feature vectors.")
+            # For demonstration, reshape features as 28x28 grayscale image, if possible
+            img_size = 28
+            expected_size = img_size * img_size
+            if X_train.shape[1] != expected_size:
+                st.error(f"Features count ({X_train.shape[1]}) doesn't match expected flattened image size {expected_size}. Cannot train CNN.")
+            else:
+                X_train_img = X_train.values.reshape(-1, img_size, img_size, 1)
+                X_test_img = X_test.values.reshape(-1, img_size, img_size, 1)
+                if task == "Classification":
+                    n_classes = len(np.unique(y_train))
+                    y_train_dl = to_categorical(y_train, num_classes=n_classes)
+                    y_test_dl = to_categorical(y_test, num_classes=n_classes)
+                else:
+                    y_train_dl = y_train
+                    y_test_dl = y_test
+
+                model = Sequential([
+                    Conv2D(32, (3,3), activation='relu', input_shape=(img_size,img_size,1)),
+                    MaxPooling2D((2,2)),
+                    Conv2D(64, (3,3), activation='relu'),
+                    MaxPooling2D((2,2)),
                     Flatten(),
-                    Dense(16,activation='relu'),
-                    Dense(yc.shape[1],activation='softmax') if not is_regression else Dense(1)
+                    Dense(64, activation='relu'),
+                    Dense(n_classes if task=="Classification" else 1, activation='softmax' if task=="Classification" else 'linear')
                 ])
-            elif dl_mode=="RNN Toy":
-                Xt = X_scaled.reshape(-1, X_scaled.shape[1], 1)
-                yc = tf.keras.utils.to_categorical(y_train) if not is_regression else y_train
-                model_dl = Sequential([
-                    LSTM(16, input_shape=(Xt.shape[1],1)),
-                    Dense(yc.shape[1] if not is_regression else 1)
-                ])
-            elif dl_mode=="DL Regression Toy":
-                Xt = X_scaled
-                yc = y_train
-                model_dl = Sequential([
-                    Dense(32, activation='relu', input_shape=(Xt.shape[1],)),
-                    Dense(16, activation='relu'),
-                    Dense(yc.shape[1] if yc.ndim>1 else 1)
-                ])
-            loss = 'mse' if is_regression else 'categorical_crossentropy'
-            model_dl.compile(optimizer='adam', loss=loss, metrics=['mse'] if is_regression else ['accuracy'])
-            history = model_dl.fit(Xc if 'Xc' in locals() else Xt, yc, epochs=5, validation_split=0.2, verbose=0)
-            st.line_chart(history.history)
-            st.write("Final metrics:", history.history)
 
+                model.compile(optimizer='adam',
+                              loss='categorical_crossentropy' if task=="Classification" else 'mse',
+                              metrics=['accuracy'] if task=="Classification" else ['mse'])
+
+                model.fit(X_train_img, y_train_dl, epochs=20, batch_size=32, verbose=0)
+                preds_prob = model.predict(X_test_img)
+                if task == "Classification":
+                    preds = preds_prob.argmax(axis=1)
+                    st.write(f"Accuracy: {accuracy_score(y_test, preds):.4f}")
+                    st.text(classification_report(y_test, preds))
+                else:
+                    preds = preds_prob.flatten()
+                    st.write(f"R2 Score: {r2_score(y_test, preds):.4f}")
+                    st.write(f"RMSE: {mean_squared_error(y_test, preds, squared=False):.4f}")
+
+        elif task == "Deep Learning (RNN - for sequences)":
+            st.info("Expecting sequence data in shape (samples, timesteps, features). Your CSV must be reshaped appropriately.")
+            # Simplified: reshape to (samples, timesteps=10, features=features/10)
+            seq_len = 10
+            if X_train.shape[1] % seq_len != 0:
+                st.error(f"Number of features ({X_train.shape[1]}) not divisible by {seq_len}, can't reshape for RNN.")
+            else:
+                n_features = X_train.shape[1] // seq_len
+                X_train_seq = X_train.values.reshape(-1, seq_len, n_features)
+                X_test_seq = X_test.values.reshape(-1, seq_len, n_features)
+                if task == "Classification":
+                    n_classes = len(np.unique(y_train))
+                    y_train_dl = to_categorical(y_train, num_classes=n_classes)
+                    y_test_dl = to_categorical(y_test, num_classes=n_classes)
+                else:
+                    y_train_dl = y_train
+                    y_test_dl = y_test
+
+                model = Sequential([
+                    LSTM(64, input_shape=(seq_len, n_features)),
+                    Dense(32, activation='relu'),
+                    Dense(n_classes if task=="Classification" else 1, activation='softmax' if task=="Classification" else 'linear')
+                ])
+
+                model.compile(optimizer='adam',
+                              loss='categorical_crossentropy' if task=="Classification" else 'mse',
+                              metrics=['accuracy'] if task=="Classification" else ['mse'])
+
+                model.fit(X_train_seq, y_train_dl, epochs=20, batch_size=32, verbose=0)
+                preds_prob = model.predict(X_test_seq)
+                if task == "Classification":
+                    preds = preds_prob.argmax(axis=1)
+                    st.write(f"Accuracy: {accuracy_score(y_test, preds):.4f}")
+                    st.text(classification_report(y_test, preds))
+                else:
+                    preds = preds_prob.flatten()
+                    st.write(f"R2 Score: {r2_score(y_test, preds):.4f}")
+                    st.write(f"RMSE: {mean_squared_error(y_test, preds, squared=False):.4f}")
+
+    # --- MODEL SAVING & LOADING ---
+    st.markdown("---")
+    st.header("Model Persistence & Serving")
+
+    save_path = st.text_input("Enter path to save model (e.g. model.pkl or model.h5)", value="model.pkl")
+
+    if st.button("Save Model"):
+        try:
+            if "tensorflow" in str(type(model)).lower():
+                # TF model saving
+                model.save(save_path)
+                st.success(f"TensorFlow model saved to {save_path}")
+            else:
+                joblib.dump(model, save_path)
+                st.success(f"Model saved to {save_path}")
+            # Also load into API model_storage dict for serving
+            if "tensorflow" in str(type(model)).lower():
+                model_storage[model_name] = model
+            else:
+                model_storage[model_name] = joblib.load(save_path)
+        except Exception as e:
+            st.error(f"Failed to save model: {e}")
+
+    load_path = st.text_input("Enter path to load model", value="model.pkl")
+
+    if st.button("Load Model"):
+        try:
+            if load_path.endswith(".h5"):
+                tf = import_tf()
+                model_storage[model_name] = tf.keras.models.load_model(load_path)
+                st.success(f"TensorFlow model loaded from {load_path}")
+            else:
+                model_storage[model_name] = joblib.load(load_path)
+                st.success(f"Model loaded from {load_path}")
+        except Exception as e:
+            st.error(f"Failed to load model: {e}")
+
+    # --- SHAP / LIME Explainability ---
+    st.markdown("---")
+    st.header("Explainability (SHAP/LIME)")
+
+    if model is not None:
+        explainer_type = st.selectbox("Choose Explainer", options=["SHAP", "LIME"])
+
+        if explainer_type == "SHAP":
+            try:
+                if hasattr(model, "predict"):
+                    explainer = shap.Explainer(model, X_train)
+                    shap_values = explainer(X_test)
+                    st.set_option('deprecation.showPyplotGlobalUse', False)
+                    shap.summary_plot(shap_values, X_test, show=False)
+                    st.pyplot(bbox_inches='tight')
+                else:
+                    st.warning("Model does not support SHAP explainer.")
+            except Exception as e:
+                st.error(f"SHAP failed: {e}")
+
+        elif explainer_type == "LIME":
+            try:
+                explainer = lime.lime_tabular.LimeTabularExplainer(
+                    training_data=np.array(X_train),
+                    feature_names=X_train.columns,
+                    class_names=[str(i) for i in np.unique(y_train)] if task == "Classification" else None,
+                    mode='classification' if task == "Classification" else 'regression'
+                )
+                idx = st.number_input("Instance index to explain", min_value=0, max_value=len(X_test)-1, value=0)
+                exp = explainer.explain_instance(X_test.iloc[idx].values, model.predict)
+                st.write(exp.as_list())
+                fig = exp.as_pyplot_figure()
+                st.pyplot(fig)
+            except Exception as e:
+                st.error(f"LIME failed: {e}")
+
+# Run FastAPI server in separate thread alongside Streamlit
+if __name__ == "__main__":
+    threading.Thread(target=run_api, daemon=True).start()

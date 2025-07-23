@@ -1,129 +1,117 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import joblib
 import os
-import io
-import zipfile
-from PIL import Image
 import matplotlib.pyplot as plt
-
+import seaborn as sns
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-from sklearn.preprocessing import StandardScaler, PolynomialFeatures, LabelEncoder
-from sklearn.metrics import mean_squared_error, accuracy_score, classification_report
-from sklearn.pipeline import Pipeline
-import shap
-import lime.lime_tabular
-import tensorflow as tf
-from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Conv2D, Flatten, Dense
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from tensorflow.keras.optimizers import Adam
+import shutil
 
-st.set_page_config(page_title="Enhanced ML App", layout="wide")
-st.title("📊 ML + DL + CNN Upload + Metrics Dashboard")
+st.set_page_config(page_title="AutoML Dashboard", layout="wide")
 
-Python3_version = "3.10"
-st.sidebar.info(f"Recommended Python version: {Python3_version}")
+st.title("📊 AutoML + CNN Dashboard")
 
-# --------- Data upload & modeling ---------
-data_file = st.file_uploader("Upload CSV (tabular)", type=["csv"])
-if data_file:
-    df = pd.read_csv(data_file)
-    st.dataframe(df.head())
-    target = st.selectbox("Select target column", df.columns)
-    task = st.selectbox("Choose task", ["Regression", "Classification", "Polynomial Regression"])
+tab1, tab2 = st.tabs(["Tabular Data (CSV)", "Image Classification (CNN)"])
 
-    X = df.drop(columns=[target])
-    y = df[target]
-    if task == "Classification":
-        le = LabelEncoder()
-        y = le.fit_transform(y)
+# ------------------ TABULAR DATA ------------------
+with tab1:
+    uploaded_file = st.file_uploader("Upload your CSV dataset", type=["csv"])
+    if uploaded_file:
+        df = pd.read_csv(uploaded_file)
+        st.write("Preview of Dataset", df.head())
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    model = None
+        target = st.selectbox("Select Target Column", df.columns)
 
-    if st.button("Train Tabular Model"):
-        if task == "Regression":
-            model = RandomForestRegressor(random_state=42)
-        elif task == "Classification":
-            model = RandomForestClassifier(random_state=42)
-        else:
-            degree = st.slider("Polynomial degree", 2, 5, 3)
-            model = Pipeline([
-                ("poly", PolynomialFeatures(degree)),
-                ("lr", LinearRegression())
-            ])
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        st.write("Evaluation results:")
-        if task == "Classification":
-            st.write("Accuracy:", accuracy_score(y_test, y_pred))
+        if target:
+            X = df.drop(target, axis=1)
+            y = df[target]
+
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+            model = RandomForestClassifier()
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            acc = accuracy_score(y_test, y_pred)
+            st.success(f"Accuracy: {acc:.2f}")
+
+            st.text("Classification Report")
             st.text(classification_report(y_test, y_pred))
+
+            st.text("Confusion Matrix")
+            cm = confusion_matrix(y_test, y_pred)
+            fig, ax = plt.subplots()
+            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
+            st.pyplot(fig)
+
+# ------------------ IMAGE DATA / CNN ------------------
+with tab2:
+    st.subheader("Upload a ZIP of your image dataset (train/val split inside)")
+    zip_file = st.file_uploader("Upload ZIP File of Image Dataset", type=["zip"])
+
+    if zip_file:
+        import zipfile
+        import tempfile
+
+        temp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(temp_dir, "dataset.zip")
+        with open(zip_path, "wb") as f:
+            f.write(zip_file.read())
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+
+        # Assume folders inside extracted dir: train/ and val/
+        st.success("Dataset extracted successfully!")
+
+        img_height = st.slider("Image Height", 64, 224, 128)
+        img_width = st.slider("Image Width", 64, 224, 128)
+        batch_size = st.slider("Batch Size", 8, 64, 32)
+        epochs = st.slider("Epochs", 1, 20, 5)
+
+        train_path = os.path.join(temp_dir, "train")
+        val_path = os.path.join(temp_dir, "val")
+
+        if os.path.exists(train_path) and os.path.exists(val_path):
+            datagen = ImageDataGenerator(rescale=1./255)
+            train_gen = datagen.flow_from_directory(train_path, target_size=(img_height, img_width), batch_size=batch_size, class_mode='categorical')
+            val_gen = datagen.flow_from_directory(val_path, target_size=(img_height, img_width), batch_size=batch_size, class_mode='categorical')
+
+            model = Sequential([
+                Conv2D(32, (3, 3), activation='relu', input_shape=(img_height, img_width, 3)),
+                MaxPooling2D(2, 2),
+                Conv2D(64, (3, 3), activation='relu'),
+                MaxPooling2D(2, 2),
+                Flatten(),
+                Dense(128, activation='relu'),
+                Dropout(0.5),
+                Dense(train_gen.num_classes, activation='softmax')
+            ])
+
+            model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+
+            history = model.fit(train_gen, validation_data=val_gen, epochs=epochs)
+
+            st.success("Model Training Completed!")
+
+            st.subheader("Training Metrics")
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+            ax1.plot(history.history['accuracy'], label='Train Acc')
+            ax1.plot(history.history['val_accuracy'], label='Val Acc')
+            ax1.legend()
+            ax1.set_title("Accuracy")
+
+            ax2.plot(history.history['loss'], label='Train Loss')
+            ax2.plot(history.history['val_loss'], label='Val Loss')
+            ax2.legend()
+            ax2.set_title("Loss")
+
+            st.pyplot(fig)
         else:
-            st.write("MSE:", mean_squared_error(y_test, y_pred))
-
-        joblib.dump(model, "tabular_model.pkl")
-        st.success("Model trained & saved.")
-
-        # Metrics dashboard
-        st.subheader("Feature Importance")
-        if hasattr(model, "feature_importances_"):
-            fi = model.feature_importances_
-            st.bar_chart(pd.Series(fi, index=X.columns))
-
-        st.subheader("SHAP Summary (first 100 rows)")
-        explainer = shap.Explainer(model, X_train)
-        shap_values = explainer(X_test[:100])
-        fig = shap.plots.beeswarm(shap_values, show=False)
-        st.pyplot(fig)
-
-# --------- CNN dataset upload ---------
-st.header("📸 CNN Model Training (Image Data)")
-cnn_zip = st.file_uploader("Upload images ZIP (single class folders)", type=["zip"])
-if cnn_zip and st.button("Train CNN"):
-    with zipfile.ZipFile(io.BytesIO(cnn_zip.read())) as zf:
-        images, labels = [], []
-        for fname in zf.namelist():
-            if fname.lower().endswith(("png", "jpg", "jpeg")):
-                with zf.open(fname) as f:
-                    img = Image.open(f).convert("RGB").resize((64, 64))
-                    images.append(np.array(img)/255.0)
-                    labels.append(os.path.dirname(fname))
-        X = np.stack(images)
-        le = LabelEncoder()
-        y = le.fit_transform(labels)
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-        model = Sequential([
-            Conv2D(16, (3,3), activation='relu', input_shape=X_train.shape[1:]),
-            Flatten(),
-            Dense(len(le.classes_), activation='softmax')
-        ])
-        model.compile("adam", "sparse_categorical_crossentropy", metrics=["accuracy"])
-
-        hist = model.fit(X_train, y_train, epochs=5, validation_split=0.2)
-        st.write("Training complete.")
-        st.line_chart(pd.DataFrame(hist.history))
-
-        loss, acc = model.evaluate(X_test, y_test, verbose=0)
-        st.write(f"Test Accuracy: {acc:.3f}")
-        model.save("cnn_model_tf")
-
-# --------- Model serving UI ---------
-st.header("🤖 Prediction UI")
-if st.sidebar.button("Load Tabular Model"):
-    if os.path.exists("tabular_model.pkl"):
-        model = joblib.load("tabular_model.pkl")
-        st.success("Tabular model loaded.")
-
-if 'model' in locals():
-    inp = {}
-    for col in X_train.columns:
-        inp[col] = st.number_input(f"Input {col}", value=0.0)
-    if st.button("Predict"):
-        pred = model.predict(pd.DataFrame([inp]))
-        st.write("Prediction:", float(pred))
-
-st.sidebar.write("✅ All features included. Delete cache before redeploy.")
-
+            st.error("Train/Val folder structure not found in ZIP.")

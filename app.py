@@ -55,8 +55,7 @@ with tab1:
 
             # Multilabel processing
             if multilabel:
-                # Expect y values as strings of lists, e.g. "[1,3]"
-                y = y.apply(eval)  # Convert string to list safely if data is correct
+                y = y.apply(eval)  # Convert string repr of lists to actual list
                 mlb = MultiLabelBinarizer()
                 y = pd.DataFrame(mlb.fit_transform(y), columns=mlb.classes_)
 
@@ -70,7 +69,6 @@ with tab1:
 
             use_grid = st.checkbox("Use Hyperparameter Tuning (Grid Search)")
 
-            # Save/load model option
             save_model = st.checkbox("Save trained model after training")
             load_model_file = st.file_uploader("Load a trained model (.joblib)", type=["joblib"])
 
@@ -104,15 +102,13 @@ with tab1:
                 return model, params
 
             if load_model_file:
-                # Load model from file, skip training
-                loaded_model = joblib.load(load_model_file)
-                best_model = loaded_model
+                best_model = joblib.load(load_model_file)
                 st.success("Model loaded successfully!")
             else:
                 model, param_grid = get_model_and_params(model_name, task_type)
                 if use_grid and param_grid:
                     st.write("Performing Grid Search for hyperparameter tuning...")
-                    grid = GridSearchCV(model, param_grid, cv=3, n_jobs=-1, verbose=0)
+                    grid = GridSearchCV(model, param_grid, cv=3, n_jobs=-1)
                     grid.fit(X_train, y_train)
                     best_model = grid.best_estimator_
                     st.success(f"Best Params: {grid.best_params_}")
@@ -124,40 +120,30 @@ with tab1:
             st.subheader("Model Performance Metrics")
 
             if task_type == "Classification":
-                # Multilabel case
                 if multilabel:
-                    # Metrics for multilabel classification
                     acc = accuracy_score(y_test, y_pred)
                     f1 = f1_score(y_test, y_pred, average='weighted')
                     st.write(f"Accuracy: {acc:.4f}")
                     st.write(f"F1 Score (weighted): {f1:.4f}")
-
                     st.text("Classification Report")
                     st.text(classification_report(y_test, y_pred))
-
-                    # Confusion matrix not well defined for multilabel; skip or show label-wise results
-
                 else:
                     acc = accuracy_score(y_test, y_pred)
                     f1 = f1_score(y_test, y_pred, average='weighted')
                     st.write(f"Accuracy: {acc:.4f}")
                     st.write(f"F1 Score: {f1:.4f}")
-
                     st.text("Classification Report")
                     st.text(classification_report(y_test, y_pred))
-
                     st.text("Confusion Matrix")
                     cm = confusion_matrix(y_test, y_pred)
                     fig, ax = plt.subplots()
                     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax)
                     st.pyplot(fig)
-
             else:
                 r2 = r2_score(y_test, y_pred)
                 mse = mean_squared_error(y_test, y_pred)
                 st.write(f"R² Score: {r2:.4f}")
                 st.write(f"Mean Squared Error: {mse:.4f}")
-
                 fig, ax = plt.subplots()
                 ax.scatter(y_test, y_pred, alpha=0.6)
                 ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--')
@@ -166,33 +152,28 @@ with tab1:
                 ax.set_title("Actual vs Predicted")
                 st.pyplot(fig)
 
-            # Save model to file if asked
             if save_model and not load_model_file:
                 model_filename = st.text_input("Enter filename to save model (e.g. model.joblib)", value="model.joblib")
                 if st.button("Save Model"):
                     joblib.dump(best_model, model_filename)
                     st.success(f"Model saved to {model_filename}")
 
-            # Export classification report or regression results
             if st.button("Export Metrics Report"):
+                buffer = io.StringIO()
                 if task_type == "Classification":
                     report_text = classification_report(y_test, y_pred)
-                    buffer = io.StringIO()
                     buffer.write(f"Classification Report\n\n{report_text}\n")
                     buffer.write(f"\nAccuracy: {acc:.4f}\nF1 Score: {f1:.4f}\n")
                     st.download_button("Download Report", data=buffer.getvalue(), file_name="classification_report.txt")
                 else:
-                    buffer = io.StringIO()
                     buffer.write(f"Regression Metrics\n\nR2 Score: {r2:.4f}\nMean Squared Error: {mse:.4f}\n")
                     st.download_button("Download Report", data=buffer.getvalue(), file_name="regression_report.txt")
-
 
 # ------------------ IMAGE DATA / CNN ------------------
 with tab2:
     st.subheader("Upload a ZIP of your image dataset (train/val split inside)")
     zip_file = st.file_uploader("Upload ZIP File of Image Dataset", type=["zip"])
 
-    # Save/load model option for CNN
     save_cnn = st.checkbox("Save CNN model after training")
     load_cnn_model = st.file_uploader("Load saved CNN model (.h5)", type=["h5"])
 
@@ -219,32 +200,20 @@ with tab2:
             train_gen = datagen.flow_from_directory(train_path, target_size=(img_height, img_width), batch_size=batch_size, class_mode='categorical')
             val_gen = datagen.flow_from_directory(val_path, target_size=(img_height, img_width), batch_size=batch_size, class_mode='categorical')
 
-            st.write("Select CNN Architecture")
-            arch = st.selectbox("Architecture", ["Simple CNN", "Deeper CNN"])
-
             if load_cnn_model:
                 model = load_model(load_cnn_model)
-                st.success("CNN Model loaded successfully!")
+                st.success("CNN model loaded successfully!")
             else:
-                model = Sequential()
-                if arch == "Simple CNN":
-                    model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(img_height, img_width, 3)))
-                    model.add(MaxPooling2D(2, 2))
-                    model.add(Flatten())
-                    model.add(Dense(128, activation='relu'))
-                    model.add(Dropout(0.5))
-                    model.add(Dense(train_gen.num_classes, activation='softmax'))
-                else:
-                    model.add(Conv2D(32, (3, 3), activation='relu', input_shape=(img_height, img_width, 3)))
-                    model.add(MaxPooling2D(2, 2))
-                    model.add(Conv2D(64, (3, 3), activation='relu'))
-                    model.add(MaxPooling2D(2, 2))
-                    model.add(Conv2D(128, (3,3), activation='relu'))
-                    model.add(MaxPooling2D(2,2))
-                    model.add(Flatten())
-                    model.add(Dense(256, activation='relu'))
-                    model.add(Dropout(0.5))
-                    model.add(Dense(train_gen.num_classes, activation='softmax'))
+                model = Sequential([
+                    Conv2D(32, (3, 3), activation='relu', input_shape=(img_height, img_width, 3)),
+                    MaxPooling2D(2, 2),
+                    Conv2D(64, (3, 3), activation='relu'),
+                    MaxPooling2D(2, 2),
+                    Flatten(),
+                    Dense(128, activation='relu'),
+                    Dropout(0.5),
+                    Dense(train_gen.num_classes, activation='softmax')
+                ])
 
                 model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
 
@@ -253,8 +222,6 @@ with tab2:
                 history = model.fit(train_gen, validation_data=val_gen, epochs=epochs, callbacks=[early_stop])
 
                 st.success("Model Training Completed!")
-
-                st.subheader("Training Metrics")
 
                 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
                 ax1.plot(history.history['accuracy'], label='Train Acc')
@@ -269,12 +236,12 @@ with tab2:
 
                 st.pyplot(fig)
 
-            # Save CNN model after training
-            if save_cnn and not load_cnn_model:
-                model_filename = st.text_input("Enter filename to save CNN model (e.g. cnn_model.h5)", value="cnn_model.h5")
-                if st.button("Save CNN Model"):
-                    model.save(model_filename)
-                    st.success(f"CNN model saved to {model_filename}")
+                if save_cnn:
+                    model_filename = st.text_input("Enter filename to save CNN model (e.g. cnn_model.h5)", value="cnn_model.h5")
+                    if st.button("Save CNN Model"):
+                        model.save(model_filename)
+                        st.success(f"CNN model saved to {model_filename}")
 
         else:
-            st.error("Train/Val folder structure not found in ZIP.")
+            st.error("Train/Val folder structure not found inside ZIP. Please make sure your ZIP contains 'train/' and 'val/' folders.")
+

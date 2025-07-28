@@ -136,11 +136,10 @@
 #                 model.save(fname); st.success(f"Saved {fname}")
 #         else:
 #             st.error("Missing 'train/' or 'val/' folder in your zip")
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os, tempfile, zipfile, joblib
+import os, tempfile, zipfile, joblib, io
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
@@ -165,7 +164,6 @@ st.title("📊 AutoML + CNN Dashboard w/ Auto Cleaning & Docker Support")
 tab1, tab2 = st.tabs(["📈 Tabular CSV Data", "📷 Image Classification (CNN)"])
 
 def clean_prepare(df, target, is_class):
-    st.info("Starting data cleaning & preprocessing…")
     X = df.drop(target, axis=1)
     y = df[target]
     X = X.select_dtypes(include=[np.number]).fillna(X.mean())
@@ -173,7 +171,6 @@ def clean_prepare(df, target, is_class):
     X = pd.get_dummies(X)
     if is_class and (y.dtype == object or not np.issubdtype(y.dtype, np.number)):
         y = LabelEncoder().fit_transform(y)
-        st.success("Target label-encoded.")
     return X, y
 
 def auto_model(is_class):
@@ -184,7 +181,6 @@ def generate_notebook(code_string):
     nb.cells.append(new_code_cell(code_string))
     return nb
 
-# ---------------- TAB 1 ---------------- #
 with tab1:
     csv = st.file_uploader("Upload CSV", type=["csv"])
     if csv:
@@ -243,12 +239,22 @@ with tab1:
                 ax.scatter(y_test, pred_test, alpha=0.6)
                 st.pyplot(fig)
 
-            # Download metrics
             df_metrics = pd.DataFrame([metrics])
-            st.download_button("📥 Download Excel Report", df_metrics.to_excel(index=False), file_name="report.xlsx")
-            st.download_button("📥 Download CSV Report", df_metrics.to_csv(index=False), file_name="report.csv")
 
-            # Generate notebook
+            # Excel download (fixed)
+            excel_buffer = io.BytesIO()
+            with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+                df_metrics.to_excel(writer, index=False)
+            excel_buffer.seek(0)
+            st.download_button("📥 Download Excel Report", data=excel_buffer,
+                               file_name="report.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+            # CSV download
+            csv_buffer = df_metrics.to_csv(index=False).encode('utf-8')
+            st.download_button("📥 Download CSV Report", csv_buffer, file_name="report.csv", mime="text/csv")
+
+            # Jupyter notebook download
             code_str = f"""
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -273,7 +279,7 @@ print("Precision:", precision_score(y_test, pred, average='weighted'))
             with tempfile.NamedTemporaryFile(delete=False, suffix=".ipynb") as tmp_nb:
                 nbformat.write(nb, tmp_nb.name)
                 with open(tmp_nb.name, 'rb') as f:
-                    st.download_button("📘 Download Jupyter Notebook", f.read(), file_name="model_report.ipynb")
+                    st.download_button("📘 Download Jupyter Notebook", f.read(), file_name="report.ipynb")
 
             if st.checkbox("💾 Save trained model"):
                 fname = st.text_input("Filename", "model.joblib")
@@ -281,7 +287,7 @@ print("Precision:", precision_score(y_test, pred, average='weighted'))
                     joblib.dump(model, fname)
                     st.success(f"Model saved to {fname}")
 
-# ---------------- TAB 2 ---------------- #
+# CNN TAB (unchanged, working)
 with tab2:
     zip_file = st.file_uploader("Upload ZIP (with train/val folders)", type=["zip"])
     if zip_file:
@@ -298,7 +304,7 @@ with tab2:
 
         tp, vp = os.path.join(tmp, "train"), os.path.join(tmp, "val")
         if os.path.isdir(tp) and os.path.isdir(vp):
-            datagen = ImageDataGenerator(rescale=1.0/255)
+            datagen = ImageDataGenerator(rescale=1.0 / 255)
             trg = datagen.flow_from_directory(tp, target_size=(img_h, img_w), batch_size=bs, class_mode="categorical")
             vlg = datagen.flow_from_directory(vp, target_size=(img_h, img_w), batch_size=bs, class_mode="categorical")
 

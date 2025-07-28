@@ -139,14 +139,13 @@
 
 
 
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import os, tempfile, zipfile, joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
-import json
+import nbformat
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.model_selection import train_test_split, GridSearchCV
@@ -159,7 +158,7 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from nbformat import v4 as nbf
+from nbformat.v4 import new_notebook, new_code_cell
 
 st.set_page_config(page_title="AutoML + CNN Dashboard", layout="wide")
 st.title("📊 AutoML + CNN Dashboard w/ Auto Cleaning & Docker Support")
@@ -170,16 +169,11 @@ def clean_prepare(df, target, is_class):
     st.info("Starting data cleaning & preprocessing…")
     X = df.drop(target, axis=1)
     y = df[target]
-    missing = df.isnull().sum()
-    if missing.any():
+    if df.isnull().sum().any():
         st.warning("Missing data detected and auto-filled!")
     X = X.select_dtypes(include=[np.number]).fillna(X.mean())
-    if is_class:
-        y = y.fillna(y.mode()[0])
-    else:
-        y = y.fillna(y.mean())
+    y = y.fillna(y.mode()[0] if is_class else y.mean())
     X = pd.get_dummies(X)
-    st.success("Features one-hot encoded.")
     if is_class and (y.dtype == object or not np.issubdtype(y.dtype, np.number)):
         y = LabelEncoder().fit_transform(y)
         st.success("Target label-encoded.")
@@ -194,8 +188,8 @@ def auto_model(is_class):
         return RandomForestRegressor(random_state=42)
 
 def generate_notebook(code_string):
-    nb = nbf.new_notebook()
-    nb.cells.append(nbf.new_code_cell(code_string))
+    nb = new_notebook()
+    nb.cells.append(new_code_cell(code_string))
     return nb
 
 with tab1:
@@ -237,7 +231,8 @@ with tab1:
                     "Recall Score": recall_score(y_test, pred_test, average='weighted'),
                     "Precision Score": precision_score(y_test, pred_test, average='weighted')
                 }
-                st.write("Metrics:", result_metrics)
+                st.write("Classification Metrics:")
+                st.json(result_metrics)
                 st.text(classification_report(y_test, pred_test))
                 fig, ax = plt.subplots()
                 sns.heatmap(confusion_matrix(y_test, pred_test), annot=True, fmt="d", ax=ax)
@@ -251,17 +246,18 @@ with tab1:
                     "MAE": mean_absolute_error(y_test, pred_test),
                     "MSE": mean_squared_error(y_test, pred_test)
                 }
-                st.write("Regression Metrics:", result_metrics)
+                st.write("Regression Metrics:")
+                st.json(result_metrics)
                 fig, ax = plt.subplots()
                 ax.scatter(y_test, pred_test, alpha=0.6)
                 st.pyplot(fig)
 
-            # Downloadable Results
+            # Download results
             result_df = pd.DataFrame([result_metrics])
-            st.download_button("📥 Download Report (Excel)", result_df.to_excel(index=False), file_name="report.xlsx")
-            st.download_button("📥 Download Report (CSV)", result_df.to_csv(index=False), file_name="report.csv")
+            st.download_button("📥 Download Excel Report", result_df.to_excel(index=False), file_name="report.xlsx")
+            st.download_button("📥 Download CSV Report", result_df.to_csv(index=False), file_name="report.csv")
 
-            # Download Notebook File
+            # Download Notebook
             full_code = f"""
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -276,25 +272,23 @@ y = LabelEncoder().fit_transform(y)
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={tr}/100, random_state=42)
 model = RandomForestClassifier(random_state=42)
 model.fit(X_train, y_train)
-pred_test = model.predict(X_test)
-
-print("Accuracy:", accuracy_score(y_test, pred_test))
-print("F1:", f1_score(y_test, pred_test, average='weighted'))
-print("Recall:", recall_score(y_test, pred_test, average='weighted'))
-print("Precision:", precision_score(y_test, pred_test, average='weighted'))
+pred = model.predict(X_test)
+print("Accuracy:", accuracy_score(y_test, pred))
+print("F1 Score:", f1_score(y_test, pred, average='weighted'))
+print("Recall:", recall_score(y_test, pred, average='weighted'))
+print("Precision:", precision_score(y_test, pred, average='weighted'))
             """.strip()
-
             nb = generate_notebook(full_code)
-            import nbformat
             with tempfile.NamedTemporaryFile(delete=False, suffix=".ipynb") as tmp_nb:
                 nbformat.write(nb, tmp_nb.name)
                 with open(tmp_nb.name, 'rb') as f:
-                    st.download_button("📘 Download IPython Notebook", f.read(), file_name="report.ipynb")
+                    st.download_button("📘 Download Jupyter Notebook", f.read(), file_name="process_report.ipynb")
 
             if st.checkbox("💾 Save trained model"):
                 fname = st.text_input("Filename", "model.joblib")
-                joblib.dump(model, fname)
-                st.success(f"Saved to {fname}")
+                if fname:
+                    joblib.dump(model, fname)
+                    st.success(f"Saved to {fname}")
 
 with tab2:
     zip_file = st.file_uploader("Upload ZIP (with train/val folders)", type=["zip"])
@@ -318,9 +312,6 @@ with tab2:
                 Flatten(), Dense(128,activation='relu'), Dropout(0.5),
                 Dense(trg.num_classes, activation="softmax")
             ])
-            model.compile(Adam(), loss="categorical_crossentropy", metrics=["accuracy"])
+            model.compile(optimizer=Adam(), loss="categorical_crossentropy", metrics=["accuracy"])
             hist = model.fit(trg, validation_data=vlg, epochs=ep)
-            st.success("Training completed")
-            fig, ax = plt.subplots(1,2, figsize=(10,4))
-            ax[0].plot(hist.history['accuracy'], label
-```
+           

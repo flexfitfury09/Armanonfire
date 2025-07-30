@@ -406,17 +406,24 @@ def clean_prepare(df, target, is_class):
     X = pd.get_dummies(X, drop_first=True)
 
     # Impute missing values in the target variable
+    original_y_name = y.name # Store original name
+    original_y_index = y.index # Store original index
+
     if is_class:
         if y.isnull().any():
             y = y.fillna(y.mode()[0]) # For classification, fill with mode
         # Ensure target is encoded if it's an object type and classification
         if y.dtype == object or not np.issubdtype(y.dtype, np.number):
             le = LabelEncoder()
-            y = le.fit_transform(y)
+            y_transformed = le.fit_transform(y)
+            # Convert back to Series, preserving index and name
+            y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)
             st.session_state['le_classes'] = le.classes_ # Store classes for later use (e.g., confusion matrix labels)
     else:
         if y.isnull().any():
             y = y.fillna(y.mean()) # For regression, fill with mean
+        # Ensure y remains a Series for regression previews
+        y = pd.Series(y, index=original_y_index, name=original_y_name)
 
     return X, y
 
@@ -474,7 +481,7 @@ with tab1:
                     st.pyplot(fig)
 
 
-        target = st.text_input("Enter target column name", key="target_col_input")
+        target = st.text_input("Enter target column name", "Churn", key="target_col_input") # Pre-filled with "Churn"
         if target and target in df.columns:
             # Determine if it's a classification or regression problem
             # Assume classification if target is object or has few unique values
@@ -625,8 +632,8 @@ with tab1:
                 code_str = f"""
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, r2_score, mean_absolute_error, mean_squared_error
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 import numpy as np
@@ -650,15 +657,21 @@ for col in X.select_dtypes(include=np.number).columns:
 
 X = pd.get_dummies(X, drop_first=True)
 
+original_y_name = y.name
+original_y_index = y.index
+
 if is_classification_problem:
     if y.isnull().any():
         y = y.fillna(y.mode()[0])
     if y.dtype == object or not np.issubdtype(y.dtype, np.number):
         le = LabelEncoder()
-        y = le.fit_transform(y)
+        y_transformed = le.fit_transform(y)
+        y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)
 else:
     if y.isnull().any():
         y = y.fillna(y.mean())
+    y = pd.Series(y, index=original_y_index, name=original_y_name)
+
 
 # --- Feature Scaling (if applied in Streamlit app) ---
 # Uncomment and run if you selected 'Scale features' in the app
@@ -673,31 +686,43 @@ X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_split_r
 print(f"--- Model: {selected_model_name} ---")
 
 if is_classification_problem:
-    model = RandomForestClassifier(random_state=42) if "{selected_model_name}" == "RandomForestClassifier" else LogisticRegression(random_state=42, max_iter=1000)
-    model.fit(X_train, y_train)
-    pred_test = model.predict(X_test)
+    model = None
+    if "{selected_model_name}" == "RandomForestClassifier":
+        model = RandomForestClassifier(random_state=42)
+    elif "{selected_model_name}" == "LogisticRegression":
+        model = LogisticRegression(random_state=42, max_iter=1000)
+    
+    if model:
+        model.fit(X_train, y_train)
+        pred_test = model.predict(X_test)
 
-    print("\\nClassification Metrics:")
-    print("Test Accuracy:", accuracy_score(y_test, pred_test))
-    print("F1 Score (Weighted):", f1_score(y_test, pred_test, average='weighted'))
-    print("Recall Score (Weighted):", recall_score(y_test, pred_test, average='weighted'))
-    print("Precision Score (Weighted):", precision_score(y_test, pred_test, average='weighted'))
-    print("\\nClassification Report:")
-    print(classification_report(y_test, pred_test))
+        print("\\nClassification Metrics:")
+        print("Test Accuracy:", accuracy_score(y_test, pred_test))
+        print("F1 Score (Weighted):", f1_score(y_test, pred_test, average='weighted'))
+        print("Recall Score (Weighted):", recall_score(y_test, pred_test, average='weighted'))
+        print("Precision Score (Weighted):", precision_score(y_test, pred_test, average='weighted'))
+        print("\\nClassification Report:")
+        print(classification_report(y_test, pred_test))
 
 else: # Regression
-    model = RandomForestRegressor(random_state=42) if "{selected_model_name}" == "RandomForestRegressor" else LinearRegression()
-    model.fit(X_train, y_train)
-    pred_test = model.predict(X_test)
+    model = None
+    if "{selected_model_name}" == "RandomForestRegressor":
+        model = RandomForestRegressor(random_state=42)
+    elif "{selected_model_name}" == "LinearRegression":
+        model = LinearRegression()
+    
+    if model:
+        model.fit(X_train, y_train)
+        pred_test = model.predict(X_test)
 
-    print("\\nRegression Metrics:")
-    print("Test R²:", r2_score(y_test, pred_test))
-    print("MAE (Mean Absolute Error):", mean_absolute_error(y_test, pred_test))
-    print("MSE (Mean Squared Error):", mean_squared_error(y_test, pred_test))
-    print("RMSE (Root Mean Squared Error):", np.sqrt(mean_squared_error(y_test, pred_test)))
+        print("\\nRegression Metrics:")
+        print("Test R²:", r2_score(y_test, pred_test))
+        print("MAE (Mean Absolute Error):", mean_absolute_error(y_test, pred_test))
+        print("MSE (Mean Squared Error):", mean_squared_error(y_test, pred_test))
+        print("RMSE (Root Mean Squared Error):", np.sqrt(mean_squared_error(y_test, pred_test)))
 
 # Feature Importance (for tree-based models)
-if hasattr(model, 'feature_importances_'):
+if model and hasattr(model, 'feature_importances_'):
     feature_importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_

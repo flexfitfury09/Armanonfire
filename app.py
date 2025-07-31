@@ -351,9 +351,6 @@
 #             st.error("Missing 'train/' or 'val/' folder inside the ZIP.")
 
 
-import warnings
-warnings.filterwarnings("ignore")
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -755,7 +752,7 @@ with tab1:
                         "    params = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}",
                         "    print('Running GridSearchCV...')",
                         "    gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)",
-                        "    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={test_size}/100, random_state=42)",
+                        f"    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={test_size}/100, random_state=42)",
                         "    gs.fit(X_train, y_train)",
                         "    model = gs.best_estimator_",
                         "    print(f'Best parameters found: {gs.best_params_}')",
@@ -766,8 +763,8 @@ with tab1:
                 if cross_val_active:
                     code_lines.extend([
                         "# --- K-Fold Cross-Validation ---",
-                        "print(f'Running {n_splits}-fold cross-validation...')",
-                        "kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
+                        f"print(f'Running {n_splits}-fold cross-validation...')",
+                        f"kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
                         "if is_classification_problem:",
                         "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy')",
                         "    print('Cross-Validation Accuracy Scores:', cv_scores)",

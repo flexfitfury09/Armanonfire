@@ -351,6 +351,8 @@
 #             st.error("Missing 'train/' or 'val/' folder inside the ZIP.")
 
 
+import warnings
+warnings.filterwarnings("ignore")
 
 
 import streamlit as st

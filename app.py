@@ -394,7 +394,7 @@ with tabs[0]:
         y = df[target]
 
         for col in X.select_dtypes(include='object'):
-            X[col] = LabelEncoder().fit_transform(X[col])
+            X.loc[:, col] = LabelEncoder().fit_transform(X[col])
 
         is_classification = y.dtype == 'object' or len(np.unique(y)) < 20
         if is_classification:

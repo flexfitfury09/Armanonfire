@@ -354,7 +354,6 @@
 import warnings
 warnings.filterwarnings("ignore")
 
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -504,14 +503,12 @@ with tab1:
                 st.write(y.head())
                 st.write(f"Problem Type: {'Classification' if is_class else 'Regression'}")
 
-                if st.checkbox("Scale features (using StandardScaler)"):
+                scaling_applied = st.checkbox("Scale features (using StandardScaler)")
+                if scaling_applied:
                     scaler = StandardScaler()
                     X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)
                     st.write("Scaled Features (X) Preview:")
                     st.write(X.head())
-                    st.session_state['scaling_applied'] = True
-                else:
-                    st.session_state['scaling_applied'] = False
                 
                 
                 st.subheader("2. Model Configuration")
@@ -520,7 +517,6 @@ with tab1:
 
                 model = auto_model(selected_model_name, is_class)
                 
-                # Hyperparameter Tuning
                 grid_search_active = False
                 if (selected_model_name in ["RandomForestClassifier", "RandomForestRegressor"] or 
                     (selected_model_name in ["VotingClassifier", "VotingRegressor"] and st.checkbox("Enable GridSearch for Voting model estimators"))):
@@ -529,7 +525,6 @@ with tab1:
                         params = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}
                         st.info("Running GridSearchCV. This might take some time...")
                         
-                # Cross-Validation
                 cross_val_active = st.checkbox("Enable K-Fold Cross-Validation")
                 if cross_val_active:
                     n_splits = st.slider("Number of folds (k)", 2, 10, 5, key="k_folds")
@@ -619,7 +614,6 @@ with tab1:
                         st.write(f"Cross-Validation Accuracy Scores: {cv_scores}")
                         st.success(f"Average Accuracy: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
                         metrics = {"Average CV Accuracy": np.mean(cv_scores), "CV Std Dev": np.std(cv_scores)}
-                        # For cross-validation, there's no single test set to generate a detailed report.
                         st.info("Detailed reports (Confusion Matrix, ROC) are not available with cross-validation as there is no single test set.")
 
                     else:
@@ -632,7 +626,6 @@ with tab1:
                         st.info("Detailed plots are not available with cross-validation.")
 
 
-                # Feature Importance (for tree-based models)
                 if hasattr(model, 'feature_importances_'):
                     st.subheader("Feature Importance")
                     feature_importance = pd.DataFrame({
@@ -646,15 +639,12 @@ with tab1:
                     ax_fi.set_ylabel('Feature')
                     st.pyplot(fig_fi)
 
-                # --- Download Section ---
                 st.subheader("4. Download Outputs")
                 
-                # Prepare full cleaned dataset with target for Excel
                 cleaned_df = X.copy()
                 cleaned_df[target] = y
                 df_metrics = pd.DataFrame([metrics])
 
-                # Excel download with multiple sheets: Cleaned data + Metrics
                 excel_buffer = io.BytesIO()
                 with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
                     cleaned_df.to_excel(writer, sheet_name="Cleaned_Data", index=False)
@@ -667,133 +657,158 @@ with tab1:
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
 
-                # CSV download (metrics only)
                 csv_buffer_metrics = df_metrics.to_csv(index=False).encode('utf-8')
                 st.download_button("📥 Download CSV Report (Metrics only)", csv_buffer_metrics, file_name="report_metrics.csv", mime="text/csv")
 
 
-                # Jupyter notebook download
-                # This code string is now much more detailed, including all the new options
-                code_str = f"""
-import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, KFold
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, r2_score, mean_absolute_error, mean_squared_error, classification_report
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-import numpy as np
+                # --- Corrected Jupyter notebook download code generation ---
+                code_lines = [
+                    "import pandas as pd",
+                    "from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, KFold",
+                    "from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor",
+                    "from sklearn.linear_model import LogisticRegression, LinearRegression",
+                    "from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, r2_score, mean_absolute_error, mean_squared_error, classification_report",
+                    "from sklearn.preprocessing import LabelEncoder, StandardScaler",
+                    "import numpy as np",
+                    "",
+                    f"# Load data (assuming the CSV is in the same directory)",
+                    f"df = pd.read_csv('{csv.name}')",
+                    "",
+                    "# --- Data Cleaning and Preparation ---",
+                    f"target_col = '{target}'",
+                    f"is_classification_problem = df[target_col].dtype == object or df[target_col].nunique() < 20",
+                    "",
+                    "X = df.drop(target_col, axis=1).copy()",
+                    "y = df[target_col].copy()",
+                    "",
+                    "if 'TotalCharges' in X.columns:",
+                    "    X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')",
+                    "",
+                    "for col in X.select_dtypes(include=np.number).columns:",
+                    "    if X[col].isnull().any():",
+                    "        X[col] = X[col].fillna(X[col].mean())",
+                    "",
+                    "X = pd.get_dummies(X, drop_first=True)",
+                    "",
+                    "original_y_name = y.name",
+                    "original_y_index = y.index",
+                    "",
+                    "if is_classification_problem:",
+                    "    if y.isnull().any():",
+                    "        y = y.fillna(y.mode()[0])",
+                    "    if y.dtype == object or not np.issubdtype(y.dtype, np.number):",
+                    "        le = LabelEncoder()",
+                    "        y_transformed = le.fit_transform(y)",
+                    "        y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)",
+                    "else:",
+                    "    if y.isnull().any():",
+                    "        y = y.fillna(y.mean())",
+                    "    y = pd.Series(y, index=original_y_index, name=original_y_name)",
+                    "",
+                    "print('Data Preparation Complete.')",
+                    "",
+                    "# --- Feature Scaling (if applied) ---",
+                ]
 
-# Load data (assuming the CSV is in the same directory)
-df = pd.read_csv("{csv.name}")
+                if scaling_applied:
+                    code_lines.extend([
+                        "scaler = StandardScaler()",
+                        "X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)",
+                        "",
+                    ])
+                else:
+                    code_lines.extend([
+                        "# Note: Feature scaling was not selected in the app.",
+                        "# If you want to scale features, uncomment the lines below:",
+                        "# scaler = StandardScaler()",
+                        "# X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)",
+                        "",
+                    ])
+                
+                code_lines.extend([
+                    "# --- Model Selection & Training ---",
+                    f"print(f'--- Model: {selected_model_name} ---')",
+                    "",
+                    "if is_classification_problem:",
+                    f"    if '{selected_model_name}' == 'RandomForestClassifier':",
+                    "        model = RandomForestClassifier(random_state=42)",
+                    f"    elif '{selected_model_name}' == 'LogisticRegression':",
+                    "        model = LogisticRegression(random_state=42, max_iter=1000)",
+                    f"    elif '{selected_model_name}' == 'VotingClassifier':",
+                    "        estimators = [('rf', RandomForestClassifier(random_state=42)), ('lr', LogisticRegression(random_state=42, max_iter=1000))]",
+                    "        model = VotingClassifier(estimators=estimators, voting='hard')",
+                    "else: # Regression",
+                    f"    if '{selected_model_name}' == 'RandomForestRegressor':",
+                    "        model = RandomForestRegressor(random_state=42)",
+                    f"    elif '{selected_model_name}' == 'LinearRegression':",
+                    "        model = LinearRegression()",
+                    f"    elif '{selected_model_name}' == 'VotingRegressor':",
+                    "        estimators = [('rf', RandomForestRegressor(random_state=42)), ('lr', LinearRegression())]",
+                    "        model = VotingRegressor(estimators=estimators)",
+                    "",
+                ])
+                
+                if grid_search_active:
+                    code_lines.extend([
+                        "# --- Hyperparameter Tuning (GridSearchCV) ---",
+                        f"if '{selected_model_name}' in ['RandomForestClassifier', 'RandomForestRegressor']:",
+                        "    params = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}",
+                        "    print('Running GridSearchCV...')",
+                        "    gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)",
+                        "    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size={test_size}/100, random_state=42)",
+                        "    gs.fit(X_train, y_train)",
+                        "    model = gs.best_estimator_",
+                        "    print(f'Best parameters found: {gs.best_params_}')",
+                        "    print(f'Best score: {gs.best_score_:.4f}')",
+                        "",
+                    ])
 
-# --- Data Cleaning and Preparation ---
-target_col = "{target}"
-is_classification_problem = df[target_col].dtype == object or df[target_col].nunique() < 20
+                if cross_val_active:
+                    code_lines.extend([
+                        "# --- K-Fold Cross-Validation ---",
+                        "print(f'Running {n_splits}-fold cross-validation...')",
+                        "kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
+                        "if is_classification_problem:",
+                        "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy')",
+                        "    print('Cross-Validation Accuracy Scores:', cv_scores)",
+                        "    print(f'Average Accuracy: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
+                        "else:",
+                        "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='r2')",
+                        "    print('Cross-Validation R² Scores:', cv_scores)",
+                        "    print(f'Average R²: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
+                        "",
+                    ])
+                else:
+                    # Final evaluation block if cross-validation is NOT active
+                    code_lines.extend([
+                        "# --- Train-Test Split & Final Evaluation ---",
+                        f"test_split_ratio = {test_size}/100",
+                        "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_split_ratio, random_state=42)",
+                        "",
+                        "model.fit(X_train, y_train)",
+                        "pred_test = model.predict(X_test)",
+                        "",
+                        "print('\\nFinal Model Evaluation on Test Set:')",
+                        "if is_classification_problem:",
+                        "    print('Test Accuracy:', accuracy_score(y_test, pred_test))",
+                        "    print('F1 Score (Weighted):', f1_score(y_test, pred_test, average='weighted'))",
+                        "    print('\\nClassification Report:')",
+                        "    print(classification_report(y_test, pred_test))",
+                        "else:",
+                        "    print('Test R²:', r2_score(y_test, pred_test))",
+                        "    print('MAE (Mean Absolute Error):', mean_absolute_error(y_test, pred_test))",
+                        "    print('RMSE (Root Mean Squared Error):', np.sqrt(mean_squared_error(y_test, pred_test)))",
+                        "",
+                        "if hasattr(model, 'feature_importances_'):",
+                        "    feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)",
+                        "    print('\\nFeature Importance (Top 10):')",
+                        "    print(feature_importance.head(10))",
+                        "",
+                    ])
+                
+                # Join all lines to create the final code string
+                code_str = "\n".join(code_lines)
 
-X = df.drop(target_col, axis=1).copy()
-y = df[target_col].copy()
-
-if 'TotalCharges' in X.columns:
-    X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')
-
-for col in X.select_dtypes(include=np.number).columns:
-    if X[col].isnull().any():
-        X[col] = X[col].fillna(X[col].mean())
-
-X = pd.get_dummies(X, drop_first=True)
-
-original_y_name = y.name
-original_y_index = y.index
-
-if is_classification_problem:
-    if y.isnull().any():
-        y = y.fillna(y.mode()[0])
-    if y.dtype == object or not np.issubdtype(y.dtype, np.number):
-        le = LabelEncoder()
-        y_transformed = le.fit_transform(y)
-        y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)
-else:
-    if y.isnull().any():
-        y = y.fillna(y.mean())
-    y = pd.Series(y, index=original_y_index, name=original_y_name)
-
-
-# --- Feature Scaling (if applied) ---
-{'# Uncomment the next two lines if you selected \'Scale features\' in the app' if not st.session_state['scaling_applied'] else ''}
-{'scaler = StandardScaler()' if st.session_state['scaling_applied'] else ''}
-{'X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)' if st.session_state['scaling_applied'] else ''}
-print("Data Preparation Complete.")
-
-
-# --- Model Selection & Training ---
-print(f"--- Model: {selected_model_name} ---")
-
-if is_classification_problem:
-    if "{selected_model_name}" == "RandomForestClassifier":
-        model = RandomForestClassifier(random_state=42)
-    elif "{selected_model_name}" == "LogisticRegression":
-        model = LogisticRegression(random_state=42, max_iter=1000)
-    elif "{selected_model_name}" == "VotingClassifier":
-        estimators = [('rf', RandomForestClassifier(random_state=42)), ('lr', LogisticRegression(random_state=42, max_iter=1000))]
-        model = VotingClassifier(estimators=estimators, voting='hard')
-else: # Regression
-    if "{selected_model_name}" == "RandomForestRegressor":
-        model = RandomForestRegressor(random_state=42)
-    elif "{selected_model_name}" == "LinearRegression":
-        model = LinearRegression()
-    elif "{selected_model_name}" == "VotingRegressor":
-        estimators = [('rf', RandomForestRegressor(random_state=42)), ('lr', LinearRegression())]
-        model = VotingRegressor(estimators=estimators)
-
-{'# --- Hyperparameter Tuning (GridSearchCV) ---' if grid_search_active else ''}
-{'if "{selected_model_name}" in ["RandomForestClassifier", "RandomForestRegressor"]:' if grid_search_active else ''}
-{'    params = {{'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}}' if grid_search_active else ''}
-{'    print("Running GridSearchCV...")' if grid_search_active else ''}
-{'    gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)' if grid_search_active else ''}
-{'    gs.fit(X, y) # Note: For a notebook, you might fit on the full dataset or split here.' if grid_search_active else ''}
-{'    model = gs.best_estimator_' if grid_search_active else ''}
-{'    print("Best parameters found:", gs.best_params_)' if grid_search_active else ''}
-{'    print("Best score:", gs.best_score_)' if grid_search_active else ''}
-
-{'# --- K-Fold Cross-Validation ---' if cross_val_active else ''}
-{'if True:' if cross_val_active else ''}
-{'    print(f"Running {n_splits}-fold cross-validation...")' if cross_val_active else ''}
-{'    kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)' if cross_val_active else ''}
-{'    if is_classification_problem:' if cross_val_active else ''}
-{'        cv_scores = cross_val_score(model, X, y, cv=kf, scoring="accuracy")' if cross_val_active else ''}
-{'        print("Cross-Validation Accuracy Scores:", cv_scores)' if cross_val_active else ''}
-{'        print(f"Average Accuracy: {{np.mean(cv_scores):.4f}} (Std Dev: {{np.std(cv_scores):.4f}})")' if cross_val_active else ''}
-{'    else:' if cross_val_active else ''}
-{'        cv_scores = cross_val_score(model, X, y, cv=kf, scoring="r2")' if cross_val_active else ''}
-{'        print("Cross-Validation R² Scores:", cv_scores)' if cross_val_active else ''}
-{'        print(f"Average R²: {{np.mean(cv_scores):.4f}} (Std Dev: {{np.std(cv_scores):.4f}})")' if cross_val_active else ''}
-{'' if cross_val_active else ''}
-
-{'# --- Train-Test Split & Final Evaluation ---' if not cross_val_active else ''}
-{'else:' if not cross_val_active else ''}
-{'    test_split_ratio = {test_size}/100' if not cross_val_active else ''}
-{'    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_split_ratio, random_state=42)' if not cross_val_active else ''}
-{'' if not cross_val_active else ''}
-{'    model.fit(X_train, y_train)' if not cross_val_active else ''}
-{'    pred_test = model.predict(X_test)' if not cross_val_active else ''}
-{'' if not cross_val_active else ''}
-{'    print("\\nFinal Model Evaluation on Test Set:")' if not cross_val_active else ''}
-{'    if is_classification_problem:' if not cross_val_active else ''}
-{'        print("Test Accuracy:", accuracy_score(y_test, pred_test))' if not cross_val_active else ''}
-{'        print("F1 Score (Weighted):", f1_score(y_test, pred_test, average='weighted'))' if not cross_val_active else ''}
-{'        print("\\nClassification Report:")' if not cross_val_active else ''}
-{'        print(classification_report(y_test, pred_test))' if not cross_val_active else ''}
-{'    else:' if not cross_val_active else ''}
-{'        print("Test R²:", r2_score(y_test, pred_test))' if not cross_val_active else ''}
-{'        print("MAE (Mean Absolute Error):", mean_absolute_error(y_test, pred_test))' if not cross_val_active else ''}
-{'        print("RMSE (Root Mean Squared Error):", np.sqrt(mean_squared_error(y_test, pred_test)))' if not cross_val_active else ''}
-{'' if not cross_val_active else ''}
-{'    if hasattr(model, 'feature_importances_'):' if not cross_val_active else ''}
-{'        feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)' if not cross_val_active else ''}
-{'        print("\\nFeature Importance (Top 10):")' if not cross_val_active else ''}
-{'        print(feature_importance.head(10))' if not cross_val_active else ''}
-{'' if not cross_val_active else ''}
-"""
                 nb = generate_notebook(code_str)
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".ipynb", mode="w") as tmp_nb:
                     nbformat.write(nb, tmp_nb)
@@ -804,7 +819,6 @@ else: # Regression
                 os.remove(tmp_nb.name)
 
 
-                # Save trained model (final model from split or best from GridSearch)
                 if st.checkbox("💾 Save trained model"):
                     fname = st.text_input("Filename to save model (e.g., model.joblib)", "model.joblib", key="model_save_filename")
                     if fname:
@@ -914,7 +928,6 @@ with tab2:
         else:
             st.error("Missing 'train/' or 'val/' folder inside the ZIP file. Please ensure your ZIP structure is correct.")
         
-        # Clean up temporary directory after use
         try:
             shutil.rmtree(tmp)
         except Exception as e:

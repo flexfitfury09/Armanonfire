@@ -9,3 +9,4 @@ joblib==1.2.0
 nbformat
 xlsxwriter
 openpyxl
+xgboost

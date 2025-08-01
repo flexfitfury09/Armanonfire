@@ -350,7 +350,6 @@
 #         else:
 #             st.error("Missing 'train/' or 'val/' folder inside the ZIP.")
 
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -359,11 +358,14 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
-from sklearn.model_selection import train_test_split, GridSearchCV, cross_val_score, KFold
+from sklearn.svm import SVC
+from xgboost import XGBClassifier, XGBRegressor
+from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV, cross_val_score, KFold
 from sklearn.metrics import (
     classification_report, confusion_matrix, accuracy_score,
     r2_score, mean_squared_error, mean_absolute_error,
-    f1_score, recall_score, precision_score, roc_curve, auc
+    f1_score, recall_score, precision_score, roc_curve, auc,
+    log_loss
 )
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
@@ -373,6 +375,7 @@ from tensorflow.keras.optimizers import Adam
 import nbformat
 from nbformat.v4 import new_notebook, new_code_cell
 import shutil
+from joblib import dump, load
 
 # --- Streamlit Page Configuration ---
 st.set_page_config(page_title="AutoML + CNN Dashboard", layout="wide")
@@ -382,11 +385,11 @@ st.title("📊 AutoML + CNN Dashboard w/ Auto Cleaning & Docker Support")
 tab1, tab2 = st.tabs(["📈 Tabular CSV Data", "📷 Image Classification (CNN)"])
 
 # --- Helper Functions ---
+@st.cache_data(show_spinner=False)
 def clean_prepare(df, target, is_class):
     """
     Cleans and prepares the DataFrame for machine learning.
-    Handles numerical imputation, one-hot encoding for categorical features,
-    and target variable encoding.
+    This function is cached to avoid re-running on every widget interaction.
     """
     X = df.drop(target, axis=1).copy()
     y = df[target].copy()
@@ -403,6 +406,7 @@ def clean_prepare(df, target, is_class):
     original_y_name = y.name
     original_y_index = y.index
 
+    le = None
     if is_class:
         if y.isnull().any():
             y = y.fillna(y.mode()[0])
@@ -410,39 +414,56 @@ def clean_prepare(df, target, is_class):
             le = LabelEncoder()
             y_transformed = le.fit_transform(y)
             y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)
-            st.session_state['le_classes'] = le.classes_
     else:
         if y.isnull().any():
             y = y.fillna(y.mean())
         y = pd.Series(y, index=original_y_index, name=original_y_name)
+    
+    return X, y, le
 
-    return X, y
+def get_model_and_params(model_name, is_class):
+    """
+    Returns the selected model, default parameters, and a GridSearch/RandomSearch
+    parameter grid for the selected model.
+    """
+    model, param_grid = None, {}
 
-def auto_model(model_name, is_class):
-    """Returns the selected machine learning model with default parameters."""
     if is_class:
         if model_name == "RandomForestClassifier":
-            return RandomForestClassifier(random_state=42)
+            model = RandomForestClassifier(random_state=42)
+            param_grid = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}
         elif model_name == "LogisticRegression":
-            return LogisticRegression(random_state=42, max_iter=1000)
+            model = LogisticRegression(random_state=42, max_iter=1000)
+            param_grid = {'C': [0.1, 1, 10]}
         elif model_name == "VotingClassifier":
             estimators = [
                 ('rf', RandomForestClassifier(random_state=42)),
                 ('lr', LogisticRegression(random_state=42, max_iter=1000))
             ]
-            return VotingClassifier(estimators=estimators, voting='hard')
-    else: # Regression
+            model = VotingClassifier(estimators=estimators, voting='hard')
+        elif model_name == "XGBClassifier":
+            model = XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42)
+            param_grid = {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1]}
+        elif model_name == "SVC":
+            model = SVC(random_state=42, probability=True)
+            param_grid = {'C': [0.1, 1, 10], 'kernel': ['linear', 'rbf']}
+    else:  # Regression
         if model_name == "RandomForestRegressor":
-            return RandomForestRegressor(random_state=42)
+            model = RandomForestRegressor(random_state=42)
+            param_grid = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}
         elif model_name == "LinearRegression":
-            return LinearRegression()
+            model = LinearRegression()
         elif model_name == "VotingRegressor":
             estimators = [
                 ('rf', RandomForestRegressor(random_state=42)),
                 ('lr', LinearRegression())
             ]
-            return VotingRegressor(estimators=estimators)
-    return None
+            model = VotingRegressor(estimators=estimators)
+        elif model_name == "XGBRegressor":
+            model = XGBRegressor(random_state=42)
+            param_grid = {'n_estimators': [50, 100], 'learning_rate': [0.01, 0.1]}
+    
+    return model, param_grid
 
 def generate_notebook(code_string):
     """Generates an .ipynb file from a code string."""
@@ -456,13 +477,23 @@ with tab1:
     csv = st.file_uploader("Upload CSV", type=["csv"])
     if 'le_classes' not in st.session_state:
         st.session_state['le_classes'] = None
+    if 'metrics' not in st.session_state:
+        st.session_state['metrics'] = {}
+    if 'model' not in st.session_state:
+        st.session_state['model'] = None
+    if 'trained' not in st.session_state:
+        st.session_state['trained'] = False
+    if 'X' not in st.session_state:
+        st.session_state['X'] = None
+    if 'y' not in st.session_state:
+        st.session_state['y'] = None
 
     if csv:
         df = pd.read_csv(csv)
         st.subheader("1. Data Preview & Analysis")
         st.write(df.head())
 
-        if st.checkbox("Show detailed data analysis"):
+        with st.expander("Show detailed data analysis"):
             st.subheader("Data Description")
             st.write(df.describe())
             st.subheader("Data Types")
@@ -489,10 +520,20 @@ with tab1:
         if target and target in df.columns:
             try:
                 is_class = df[target].dtype == object or df[target].nunique() < 20
-                X, y = clean_prepare(df, target, is_class)
-                
+                X, y, le = clean_prepare(df, target, is_class)
+                st.session_state['X'] = X
+                st.session_state['y'] = y
+                if le:
+                    st.session_state['le_classes'] = le.classes_
+                else:
+                    st.session_state['le_classes'] = None
+
                 st.subheader("2. Model Configuration")
-                model_options = ["RandomForestClassifier", "LogisticRegression", "VotingClassifier"] if is_class else ["RandomForestRegressor", "LinearRegression", "VotingRegressor"]
+                
+                model_options_class = ["RandomForestClassifier", "LogisticRegression", "XGBClassifier", "SVC", "VotingClassifier"]
+                model_options_reg = ["RandomForestRegressor", "LinearRegression", "XGBRegressor", "VotingRegressor"]
+                
+                model_options = model_options_class if is_class else model_options_reg
                 selected_model_name = st.selectbox("Choose a model", model_options, key="model_selector")
                 
                 scaling_applied = st.checkbox("Scale features (using StandardScaler)", key="scaling_checkbox")
@@ -506,334 +547,351 @@ with tab1:
                 st.write(y.head())
                 st.write(f"Problem Type: {'Classification' if is_class else 'Regression'}")
                 
-                grid_search_active = False
-                if (selected_model_name in ["RandomForestClassifier", "RandomForestRegressor"] or 
-                    (selected_model_name in ["VotingClassifier", "VotingRegressor"])):
-                    if st.checkbox("Enable GridSearch", key="gridsearch_checkbox"):
-                        grid_search_active = True
-                        params = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}
-                        st.info("GridSearch is enabled. This will significantly increase the training time.")
+                model, param_grid = get_model_and_params(selected_model_name, is_class)
+                
+                search_method = None
+                if param_grid:
+                    search_method = st.radio("Choose hyperparameter tuning method:", ["None", "GridSearch", "RandomSearch"], key="search_method_radio")
                 
                 cross_val_active = st.checkbox("Enable K-Fold Cross-Validation", key="cv_checkbox")
                 n_splits = 5
                 if cross_val_active:
                     n_splits = st.slider("Number of folds (k)", 2, 10, 5, key="k_folds")
-                    st.info(f"Cross-Validation is enabled with {n_splits} folds. This will take longer to run.")
+                    st.info(f"Cross-Validation is enabled with {n_splits} folds. This will take longer to run and requires significant CPU resources.")
                 else:
                     test_size = st.slider("Test size (%)", 10, 50, 20, key="test_size_slider")
 
 
                 st.subheader("3. Model Training & Evaluation")
                 
-                model = auto_model(selected_model_name, is_class)
-                
                 if st.button("Run Model Training"):
-                    
-                    metrics = {}
-                    
-                    if not cross_val_active:
-                        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size/100, random_state=42)
-                        st.info("Training with a single train-test split...")
+                    st.session_state['trained'] = False
+                    st.session_state['metrics'] = {}
+                    st.session_state['model'] = None
 
-                        if grid_search_active:
-                            gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)
-                            gs.fit(X_train, y_train)
-                            model = gs.best_estimator_
-                            st.success(f"Best parameters found by GridSearchCV: {gs.best_params_}")
-                            st.write(f"Best score: {gs.best_score_:.4f}")
-                        else:
-                            model.fit(X_train, y_train)
+                    with st.spinner(f"Training {selected_model_name}... This may take a while, especially with Cross-Validation or GridSearch/RandomSearch."):
+                        metrics = {}
                         
-                        st.success(f"{selected_model_name} trained successfully!")
-                        
-                        pred_train = model.predict(X_train)
-                        pred_test = model.predict(X_test)
-                        
-                        st.subheader("📊 Model Performance (on Test Set)")
-                        
-                        if is_class:
-                            metrics = {
-                                "Train Accuracy": accuracy_score(y_train, pred_train),
-                                "Test Accuracy": accuracy_score(y_test, pred_test),
-                                "F1 Score (Weighted)": f1_score(y_test, pred_test, average='weighted'),
-                                "Recall Score (Weighted)": recall_score(y_test, pred_test, average='weighted'),
-                                "Precision Score (Weighted)": precision_score(y_test, pred_test, average='weighted')
-                            }
-                            st.json(metrics)
-                            st.subheader("Classification Report")
-                            report = classification_report(y_test, pred_test, target_names=st.session_state.get('le_classes'))
-                            st.text(report)
-
-                            st.subheader("Confusion Matrix")
-                            fig_cm, ax_cm = plt.subplots()
-                            sns.heatmap(confusion_matrix(y_test, pred_test), annot=True, fmt="d", ax=ax_cm,
-                                        xticklabels=st.session_state.get('le_classes'), yticklabels=st.session_state.get('le_classes'))
-                            ax_cm.set_xlabel('Predicted')
-                            ax_cm.set_ylabel('True')
-                            st.pyplot(fig_cm)
+                        if not cross_val_active:
+                            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size/100, random_state=42)
                             
-                            st.subheader("ROC Curve")
-                            if hasattr(model, "predict_proba") and not selected_model_name.startswith("Voting"):
-                                try:
-                                    y_pred_proba = model.predict_proba(X_test)[:, 1]
-                                    fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
-                                    roc_auc = auc(fpr, tpr)
-                                    fig_roc, ax_roc = plt.subplots()
-                                    ax_roc.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
-                                    ax_roc.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
-                                    ax_roc.set_title('Receiver Operating Characteristic (ROC) Curve')
-                                    ax_roc.legend(loc="lower right")
-                                    st.pyplot(fig_roc)
-                                except Exception as e:
-                                    st.warning(f"Could not plot ROC curve: {e}")
+                            if search_method == "GridSearch":
+                                st.info("Starting GridSearchCV...")
+                                gs = GridSearchCV(model, param_grid, cv=3, n_jobs=1, verbose=1)
+                                gs.fit(X_train, y_train)
+                                model = gs.best_estimator_
+                                st.success(f"Best parameters found by GridSearchCV: {gs.best_params_}")
+                                st.write(f"Best score: {gs.best_score_:.4f}")
+                            elif search_method == "RandomSearch":
+                                st.info("Starting RandomizedSearchCV...")
+                                rs = RandomizedSearchCV(model, param_grid, n_iter=10, cv=3, n_jobs=1, random_state=42, verbose=1)
+                                rs.fit(X_train, y_train)
+                                model = rs.best_estimator_
+                                st.success(f"Best parameters found by RandomizedSearchCV: {rs.best_params_}")
+                                st.write(f"Best score: {rs.best_score_:.4f}")
                             else:
-                                st.info("ROC Curve not available for this model (no predict_proba).")
+                                model.fit(X_train, y_train)
                             
-                        else: # Regression metrics
-                            metrics = {
-                                "Train R²": r2_score(y_train, pred_train),
-                                "Test R²": r2_score(y_test, pred_test),
-                                "MAE (Mean Absolute Error)": mean_absolute_error(y_test, pred_test),
-                                "MSE (Mean Squared Error)": mean_squared_error(y_test, pred_test),
-                                "RMSE (Root Mean Squared Error)": np.sqrt(mean_squared_error(y_test, pred_test))
-                            }
-                            st.json(metrics)
-                            st.subheader("Actual vs Predicted Plot")
-                            fig_reg, ax_reg = plt.subplots()
-                            ax_reg.scatter(y_test, pred_test, alpha=0.6)
-                            ax_reg.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-                            ax_reg.set_xlabel('Actual Values')
-                            ax_reg.set_ylabel('Predicted Values')
-                            ax_reg.set_title('Actual vs Predicted Values')
-                            st.pyplot(fig_reg)
-                    
-                    else: # Cross-Validation
-                        st.info(f"Running {n_splits}-fold cross-validation...")
-                        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                            st.success(f"{selected_model_name} trained successfully!")
+                            
+                            pred_train = model.predict(X_train)
+                            pred_test = model.predict(X_test)
+                            
+                            st.subheader("📊 Model Performance (on Test Set)")
+                            
+                            if is_class:
+                                metrics = {
+                                    "Train Accuracy": accuracy_score(y_train, pred_train),
+                                    "Test Accuracy": accuracy_score(y_test, pred_test),
+                                    "F1 Score (Weighted)": f1_score(y_test, pred_test, average='weighted'),
+                                    "Recall Score (Weighted)": recall_score(y_test, pred_test, average='weighted'),
+                                    "Precision Score (Weighted)": precision_score(y_test, pred_test, average='weighted')
+                                }
+                                try:
+                                    if hasattr(model, "predict_proba"):
+                                        y_pred_proba = model.predict_proba(X_test)
+                                        metrics["Log Loss"] = log_loss(y_test, y_pred_proba)
+                                except:
+                                    pass
+
+                                st.json(metrics)
+                                st.subheader("Classification Report")
+                                report = classification_report(y_test, pred_test, target_names=st.session_state.get('le_classes'))
+                                st.text(report)
+
+                                st.subheader("Confusion Matrix")
+                                fig_cm, ax_cm = plt.subplots()
+                                labels = st.session_state.get('le_classes')
+                                sns.heatmap(confusion_matrix(y_test, pred_test), annot=True, fmt="d", ax=ax_cm,
+                                            xticklabels=labels, yticklabels=labels)
+                                ax_cm.set_xlabel('Predicted')
+                                ax_cm.set_ylabel('True')
+                                st.pyplot(fig_cm)
+                                
+                                st.subheader("ROC Curve")
+                                if hasattr(model, "predict_proba") and len(np.unique(y)) == 2:
+                                    try:
+                                        y_pred_proba = model.predict_proba(X_test)[:, 1]
+                                        fpr, tpr, thresholds = roc_curve(y_test, y_pred_proba)
+                                        roc_auc = auc(fpr, tpr)
+                                        fig_roc, ax_roc = plt.subplots()
+                                        ax_roc.plot(fpr, tpr, color='darkorange', lw=2, label=f'ROC curve (area = {roc_auc:.2f})')
+                                        ax_roc.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+                                        ax_roc.set_title('Receiver Operating Characteristic (ROC) Curve')
+                                        ax_roc.legend(loc="lower right")
+                                        st.pyplot(fig_roc)
+                                    except Exception as e:
+                                        st.warning(f"Could not plot ROC curve: {e}")
+                                else:
+                                    st.info("ROC Curve is only available for binary classification models with `predict_proba`.")
+                                
+                            else: # Regression metrics
+                                metrics = {
+                                    "Train R²": r2_score(y_train, pred_train),
+                                    "Test R²": r2_score(y_test, pred_test),
+                                    "MAE (Mean Absolute Error)": mean_absolute_error(y_test, pred_test),
+                                    "MSE (Mean Squared Error)": mean_squared_error(y_test, pred_test),
+                                    "RMSE (Root Mean Squared Error)": np.sqrt(mean_squared_error(y_test, pred_test))
+                                }
+                                st.json(metrics)
+                                st.subheader("Actual vs Predicted Plot")
+                                fig_reg, ax_reg = plt.subplots()
+                                ax_reg.scatter(y_test, pred_test, alpha=0.6)
+                                ax_reg.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
+                                ax_reg.set_xlabel('Actual Values')
+                                ax_reg.set_ylabel('Predicted Values')
+                                ax_reg.set_title('Actual vs Predicted Values')
+                                st.pyplot(fig_reg)
                         
-                        if is_class:
-                            cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy')
-                            st.write(f"Cross-Validation Accuracy Scores: {cv_scores}")
-                            st.success(f"Average Accuracy: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
-                            metrics = {"Average CV Accuracy": np.mean(cv_scores), "CV Std Dev": np.std(cv_scores)}
-                            st.info("Detailed reports (Confusion Matrix, ROC) are not available with cross-validation as there is no single test set.")
+                        else: # Cross-Validation
+                            st.info(f"Running {n_splits}-fold cross-validation...")
+                            kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                            
+                            if is_class:
+                                cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy', n_jobs=1)
+                                st.write(f"Cross-Validation Accuracy Scores: {cv_scores}")
+                                st.success(f"Average Accuracy: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
+                                metrics = {"Average CV Accuracy": np.mean(cv_scores), "CV Std Dev": np.std(cv_scores)}
+                                st.info("Detailed reports (Confusion Matrix, ROC) are not available with cross-validation as there is no single test set.")
 
-                        else:
-                            cv_scores = cross_val_score(model, X, y, cv=kf, scoring='r2')
-                            cv_mse = -cross_val_score(model, X, y, cv=kf, scoring='neg_mean_squared_error')
-                            st.write(f"Cross-Validation R² Scores: {cv_scores}")
-                            st.write(f"Cross-Validation MSE Scores: {cv_mse}")
-                            st.success(f"Average R²: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
-                            metrics = {"Average CV R²": np.mean(cv_scores), "CV R² Std Dev": np.std(cv_scores), "Average CV MSE": np.mean(cv_mse)}
-                            st.info("Detailed plots are not available with cross-validation.")
+                            else:
+                                cv_scores = cross_val_score(model, X, y, cv=kf, scoring='r2', n_jobs=1)
+                                cv_mse = -cross_val_score(model, X, y, cv=kf, scoring='neg_mean_squared_error', n_jobs=1)
+                                st.write(f"Cross-Validation R² Scores: {cv_scores}")
+                                st.write(f"Cross-Validation MSE Scores: {cv_mse}")
+                                st.success(f"Average R²: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
+                                metrics = {"Average CV R²": np.mean(cv_scores), "CV R² Std Dev": np.std(cv_scores), "Average CV MSE": np.mean(cv_mse)}
+                                st.info("Detailed plots are not available with cross-validation.")
 
-                    # Common output section after both CV and train-test split
-                    if hasattr(model, 'feature_importances_'):
-                        st.subheader("Feature Importance")
-                        feature_importance = pd.DataFrame({
-                            'feature': X.columns,
-                            'importance': model.feature_importances_
-                        }).sort_values('importance', ascending=False)
-                        fig_fi, ax_fi = plt.subplots(figsize=(10, 6))
-                        sns.barplot(x='importance', y='feature', data=feature_importance.head(20), ax=ax_fi)
-                        ax_fi.set_title('Top 20 Feature Importance')
-                        ax_fi.set_xlabel('Importance')
-                        ax_fi.set_ylabel('Feature')
-                        st.pyplot(fig_fi)
-
-                    st.subheader("4. Download Outputs")
-                    
-                    cleaned_df = X.copy()
-                    cleaned_df[target] = y
-                    df_metrics = pd.DataFrame([metrics])
-
-                    excel_buffer = io.BytesIO()
-                    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                        cleaned_df.to_excel(writer, sheet_name="Cleaned_Data", index=False)
-                        df_metrics.to_excel(writer, sheet_name="Performance_Metrics", index=False)
-                    excel_buffer.seek(0)
-                    st.download_button(
-                        label="📥 Download Excel Report (Cleaned Data + Metrics)",
-                        data=excel_buffer,
-                        file_name="report_with_data.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-                    csv_buffer_metrics = df_metrics.to_csv(index=False).encode('utf-8')
-                    st.download_button("📥 Download CSV Report (Metrics only)", csv_buffer_metrics, file_name="report_metrics.csv", mime="text/csv")
-
-
-                    # --- Corrected Jupyter notebook download code generation ---
-                    code_lines = [
-                        "import pandas as pd",
-                        "from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, KFold",
-                        "from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor",
-                        "from sklearn.linear_model import LogisticRegression, LinearRegression",
-                        "from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, r2_score, mean_absolute_error, mean_squared_error, classification_report",
-                        "from sklearn.preprocessing import LabelEncoder, StandardScaler",
-                        "import numpy as np",
-                        "",
-                        f"# Load data (assuming the CSV is in the same directory)",
-                        f"df = pd.read_csv('{csv.name}')",
-                        "",
-                        "# --- Data Cleaning and Preparation ---",
-                        f"target_col = '{target}'",
-                        f"is_classification_problem = df[target_col].dtype == object or df[target_col].nunique() < 20",
-                        "",
-                        "X = df.drop(target_col, axis=1).copy()",
-                        "y = df[target_col].copy()",
-                        "",
-                        "if 'TotalCharges' in X.columns:",
-                        "    X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')",
-                        "",
-                        "for col in X.select_dtypes(include=np.number).columns:",
-                        "    if X[col].isnull().any():",
-                        "        X[col] = X[col].fillna(X[col].mean())",
-                        "",
-                        "X = pd.get_dummies(X, drop_first=True)",
-                        "",
-                        "original_y_name = y.name",
-                        "original_y_index = y.index",
-                        "",
-                        "if is_classification_problem:",
-                        "    if y.isnull().any():",
-                        "        y = y.fillna(y.mode()[0])",
-                        "    if y.dtype == object or not np.issubdtype(y.dtype, np.number):",
-                        "        le = LabelEncoder()",
-                        "        y_transformed = le.fit_transform(y)",
-                        "        y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)",
-                        "else:",
-                        "    if y.isnull().any():",
-                        "        y = y.fillna(y.mean())",
-                        "    y = pd.Series(y, index=original_y_index, name=original_y_name)",
-                        "",
-                        "print('Data Preparation Complete.')",
-                        "",
-                        "# --- Feature Scaling (if applied) ---",
-                    ]
-
-                    if scaling_applied:
-                        code_lines.extend([
-                            "scaler = StandardScaler()",
-                            "X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)",
-                            "",
-                        ])
-                    else:
-                        code_lines.extend([
-                            "# Note: Feature scaling was not selected in the app.",
-                            "# If you want to scale features, uncomment the lines below:",
-                            "# scaler = StandardScaler()",
-                            "# X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)",
-                            "",
-                        ])
-                    
-                    code_lines.extend([
-                        "# --- Model Selection & Training ---",
-                        f"print(f'--- Model: {selected_model_name} ---')",
-                        "",
-                        "if is_classification_problem:",
-                        f"    if '{selected_model_name}' == 'RandomForestClassifier':",
-                        "        model = RandomForestClassifier(random_state=42)",
-                        f"    elif '{selected_model_name}' == 'LogisticRegression':",
-                        "        model = LogisticRegression(random_state=42, max_iter=1000)",
-                        f"    elif '{selected_model_name}' == 'VotingClassifier':",
-                        "        estimators = [('rf', RandomForestClassifier(random_state=42)), ('lr', LogisticRegression(random_state=42, max_iter=1000))]",
-                        "        model = VotingClassifier(estimators=estimators, voting='hard')",
-                        "else: # Regression",
-                        f"    if '{selected_model_name}' == 'RandomForestRegressor':",
-                        "        model = RandomForestRegressor(random_state=42)",
-                        f"    elif '{selected_model_name}' == 'LinearRegression':",
-                        "        model = LinearRegression()",
-                        f"    elif '{selected_model_name}' == 'VotingRegressor':",
-                        "        estimators = [('rf', RandomForestRegressor(random_state=42)), ('lr', LinearRegression())]",
-                        "        model = VotingRegressor(estimators=estimators)",
-                        "",
-                    ])
-                    
-                    if grid_search_active:
-                        code_lines.extend([
-                            "# --- Hyperparameter Tuning (GridSearchCV) ---",
-                            "params = {'n_estimators': [50, 100, 200], 'max_depth': [None, 10, 20]}",
-                            "print('Running GridSearchCV...')",
-                            "gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)",
-                            "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)",
-                            "gs.fit(X_train, y_train)",
-                            "model = gs.best_estimator_",
-                            "print(f'Best parameters found: {gs.best_params_}')",
-                            "print(f'Best score: {gs.best_score_:.4f}')",
-                            "",
-                        ])
-
-                    if cross_val_active:
-                        code_lines.extend([
-                            "# --- K-Fold Cross-Validation ---",
-                            f"print(f'Running {n_splits}-fold cross-validation...')",
-                            f"kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
-                            "if is_classification_problem:",
-                            "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy')",
-                            "    print('Cross-Validation Accuracy Scores:', cv_scores)",
-                            "    print(f'Average Accuracy: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
-                            "else:",
-                            "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='r2')",
-                            "    print('Cross-Validation R² Scores:', cv_scores)",
-                            "    print(f'Average R²: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
-                            "",
-                        ])
-                    else:
-                        # Final evaluation block if cross-validation is NOT active
-                        code_lines.extend([
-                            "# --- Train-Test Split & Final Evaluation ---",
-                            f"test_split_ratio = {test_size}/100",
-                            "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_split_ratio, random_state=42)",
-                            "",
-                            "model.fit(X_train, y_train)",
-                            "pred_test = model.predict(X_test)",
-                            "",
-                            "print('\\nFinal Model Evaluation on Test Set:')",
-                            "if is_classification_problem:",
-                            "    print('Test Accuracy:', accuracy_score(y_test, pred_test))",
-                            "    print('F1 Score (Weighted):', f1_score(y_test, pred_test, average='weighted'))",
-                            "    print('\\nClassification Report:')",
-                            "    print(classification_report(y_test, pred_test))",
-                            "else:",
-                            "    print('Test R²:', r2_score(y_test, pred_test))",
-                            "    print('MAE (Mean Absolute Error):', mean_absolute_error(y_test, pred_test))",
-                            "    print('RMSE (Root Mean Squared Error):', np.sqrt(mean_squared_error(y_test, pred_test)))",
-                            "",
-                            "if hasattr(model, 'feature_importances_'):",
-                            "    feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)",
-                            "    print('\\nFeature Importance (Top 10):')",
-                            "    print(feature_importance.head(10))",
-                            "",
-                        ])
-                    
-                    code_str = "\n".join(code_lines)
-
-                    nb = generate_notebook(code_str)
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".ipynb", mode="w") as tmp_nb:
-                        nbformat.write(nb, tmp_nb)
-                        tmp_nb.flush()
+                        # Common output section after both CV and train-test split
+                        if hasattr(model, 'feature_importances_') and selected_model_name not in ["SVC", "LinearRegression", "LogisticRegression"]:
+                            st.subheader("Feature Importance")
+                            feature_importance = pd.DataFrame({
+                                'feature': X.columns,
+                                'importance': model.feature_importances_
+                            }).sort_values('importance', ascending=False)
+                            fig_fi, ax_fi = plt.subplots(figsize=(10, 6))
+                            sns.barplot(x='importance', y='feature', data=feature_importance.head(20), ax=ax_fi)
+                            ax_fi.set_title('Top 20 Feature Importance')
+                            ax_fi.set_xlabel('Importance')
+                            ax_fi.set_ylabel('Feature')
+                            st.pyplot(fig_fi)
                         
-                    with open(tmp_nb.name, 'rb') as f:
-                        st.download_button("📘 Download Jupyter Notebook (Full Pipeline)", f.read(), file_name="full_ml_pipeline.ipynb")
-                    os.remove(tmp_nb.name)
-
-
-                    if st.checkbox("💾 Save trained model"):
-                        fname = st.text_input("Filename to save model (e.g., model.joblib)", "model.joblib", key="model_save_filename")
-                        if fname:
-                            try:
-                                joblib.dump(model, fname)
-                                st.success(f"Model saved to {fname} successfully!")
-                            except Exception as e:
-                                st.error(f"Error saving model: {e}")
+                        st.session_state['model'] = model
+                        st.session_state['metrics'] = metrics
+                        st.session_state['trained'] = True
 
             except Exception as e:
                 st.error(f"An error occurred during processing: {e}")
-                st.info("Please check your target column name and data quality.")
+                st.info("Please check your target column name and data quality. The app may have crashed due to exceeding resource limits.")
         elif target:
             st.error("Target column not found in the dataset. Please enter a valid column name.")
 
+    if st.session_state['trained']:
+        st.subheader("4. Download Outputs")
+        
+        X = st.session_state['X']
+        y = st.session_state['y']
+        
+        cleaned_df = X.copy()
+        cleaned_df[target] = y
+        df_metrics = pd.DataFrame([st.session_state['metrics']])
+
+        excel_buffer = io.BytesIO()
+        with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+            cleaned_df.to_excel(writer, sheet_name="Cleaned_Data", index=False)
+            df_metrics.to_excel(writer, sheet_name="Performance_Metrics", index=False)
+        excel_buffer.seek(0)
+        st.download_button(
+            label="📥 Download Excel Report (Cleaned Data + Metrics)",
+            data=excel_buffer,
+            file_name="report_with_data.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        csv_buffer_metrics = df_metrics.to_csv(index=False).encode('utf-8')
+        st.download_button("📥 Download CSV Report (Metrics only)", csv_buffer_metrics, file_name="report_metrics.csv", mime="text/csv")
+
+        # --- Corrected Jupyter notebook download code generation ---
+        # The logic to build the notebook code has been significantly improved.
+        code_lines = [
+            "import pandas as pd",
+            "import numpy as np",
+            "from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, KFold",
+            "from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor",
+            "from sklearn.linear_model import LogisticRegression, LinearRegression",
+            "from sklearn.svm import SVC",
+            "from xgboost import XGBClassifier, XGBRegressor",
+            "from sklearn.metrics import accuracy_score, f1_score, recall_score, precision_score, r2_score, mean_absolute_error, mean_squared_error, classification_report, confusion_matrix, roc_curve, auc",
+            "from sklearn.preprocessing import LabelEncoder, StandardScaler",
+            "import matplotlib.pyplot as plt",
+            "import seaborn as sns",
+            "",
+            f"# Load data (assuming the CSV is in the same directory)",
+            f"df = pd.read_csv('{csv.name}')",
+            "",
+            "# --- Data Cleaning and Preparation ---",
+            f"target_col = '{target}'",
+            f"is_classification_problem = df[target_col].dtype == object or df[target_col].nunique() < 20",
+            "",
+            "X = df.drop(target_col, axis=1).copy()",
+            "y = df[target_col].copy()",
+            "",
+            "if 'TotalCharges' in X.columns:",
+            "    X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')",
+            "",
+            "for col in X.select_dtypes(include=np.number).columns:",
+            "    if X[col].isnull().any():",
+            "        X[col] = X[col].fillna(X[col].mean())",
+            "",
+            "X = pd.get_dummies(X, drop_first=True)",
+            "",
+            "original_y_name = y.name",
+            "original_y_index = y.index",
+            "",
+            "le = None",
+            "if is_classification_problem:",
+            "    if y.isnull().any():",
+            "        y = y.fillna(y.mode()[0])",
+            "    if y.dtype == object or not np.issubdtype(y.dtype, np.number):",
+            "        le = LabelEncoder()",
+            "        y_transformed = le.fit_transform(y)",
+            "        y = pd.Series(y_transformed, index=original_y_index, name=original_y_name)",
+            "else:",
+            "    if y.isnull().any():",
+            "        y = y.fillna(y.mean())",
+            "    y = pd.Series(y, index=original_y_index, name=original_y_name)",
+            "",
+            "print('Data Preparation Complete.')",
+            "",
+            "# --- Feature Scaling (if applied) ---",
+        ]
+
+        if scaling_applied:
+            code_lines.extend([
+                "scaler = StandardScaler()",
+                "X = pd.DataFrame(scaler.fit_transform(X), columns=X.columns)",
+                "",
+            ])
+        
+        # Add model and params from helper function
+        code_lines.extend([
+            f"# --- Model Selection & Training ---",
+            f"selected_model_name = '{selected_model_name}'",
+            f"is_class = {is_class}",
+            "print(f'--- Model: {selected_model_name} ---')",
+            "model, param_grid = get_model_and_params(selected_model_name, is_class)",
+            "",
+        ])
+
+        if search_method == "GridSearch":
+            code_lines.extend([
+                "# --- Hyperparameter Tuning (GridSearchCV) ---",
+                "print('Running GridSearchCV...')",
+                "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)",
+                "gs = GridSearchCV(model, param_grid, cv=3, n_jobs=-1, verbose=1)",
+                "gs.fit(X_train, y_train)",
+                "model = gs.best_estimator_",
+                "print(f'Best parameters found: {gs.best_params_}')",
+                "print(f'Best score: {gs.best_score_:.4f}')",
+                "",
+            ])
+        elif search_method == "RandomSearch":
+            code_lines.extend([
+                "# --- Hyperparameter Tuning (RandomizedSearchCV) ---",
+                "print('Running RandomizedSearchCV...')",
+                "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)",
+                "rs = RandomizedSearchCV(model, param_grid, n_iter=10, cv=3, n_jobs=-1, random_state=42, verbose=1)",
+                "rs.fit(X_train, y_train)",
+                "model = rs.best_estimator_",
+                "print(f'Best parameters found: {rs.best_params_}')",
+                "print(f'Best score: {rs.best_score_:.4f}')",
+                "",
+            ])
+
+        if cross_val_active:
+            code_lines.extend([
+                "# --- K-Fold Cross-Validation ---",
+                f"print(f'Running {n_splits}-fold cross-validation...')",
+                f"kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
+                "if is_class:",
+                "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='accuracy', n_jobs=-1)",
+                "    print('Cross-Validation Accuracy Scores:', cv_scores)",
+                "    print(f'Average Accuracy: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
+                "else:",
+                "    cv_scores = cross_val_score(model, X, y, cv=kf, scoring='r2', n_jobs=-1)",
+                "    print('Cross-Validation R² Scores:', cv_scores)",
+                "    print(f'Average R²: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
+                "",
+            ])
+        else:
+            # Final evaluation block if cross-validation is NOT active
+            code_lines.extend([
+                "# --- Train-Test Split & Final Evaluation ---",
+                f"test_split_ratio = {test_size}/100",
+                "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_split_ratio, random_state=42)",
+                "",
+                "model.fit(X_train, y_train)",
+                "pred_test = model.predict(X_test)",
+                "",
+                "print('\\nFinal Model Evaluation on Test Set:')",
+                "if is_class:",
+                "    print('Test Accuracy:', accuracy_score(y_test, pred_test))",
+                "    print('F1 Score (Weighted):', f1_score(y_test, pred_test, average='weighted'))",
+                "    print('\\nClassification Report:')",
+                "    print(classification_report(y_test, pred_test, target_names=le.classes_ if le else None))",
+                "else:",
+                "    print('Test R²:', r2_score(y_test, pred_test))",
+                "    print('MAE (Mean Absolute Error):', mean_absolute_error(y_test, pred_test))",
+                "    print('RMSE (Root Mean Squared Error):', np.sqrt(mean_squared_error(y_test, pred_test)))",
+                "",
+                "if hasattr(model, 'feature_importances_'):",
+                "    feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)",
+                "    print('\\nFeature Importance (Top 10):')",
+                "    print(feature_importance.head(10))",
+                "",
+            ])
+        
+        code_str = "\n".join(code_lines)
+        nb = generate_notebook(code_str)
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".ipynb", mode="w") as tmp_nb:
+            nbformat.write(nb, tmp_nb)
+            tmp_nb.flush()
+        
+        with open(tmp_nb.name, 'rb') as f:
+            st.download_button("📘 Download Jupyter Notebook (Full Pipeline)", f.read(), file_name="full_ml_pipeline.ipynb")
+        os.remove(tmp_nb.name)
+
+
+        if st.checkbox("💾 Save trained model"):
+            fname = st.text_input("Filename to save model (e.g., model.joblib)", "model.joblib", key="model_save_filename")
+            if fname and st.session_state['model'] is not None:
+                try:
+                    dump(st.session_state['model'], fname)
+                    st.success(f"Model saved to {fname} successfully!")
+                except Exception as e:
+                    st.error(f"Error saving model: {e}")
 
 with tab2:
     st.header("📷 Image Classification (CNN)")
@@ -856,21 +914,22 @@ with tab2:
             st.info(f"Train directory: {tp}")
             st.info(f"Validation directory: {vp}")
             try:
-                datagen = ImageDataGenerator(rescale=1.0 / 255)
-                trg = datagen.flow_from_directory(
-                    tp,
-                    target_size=(img_h, img_w),
-                    batch_size=bs,
-                    class_mode="categorical",
-                    shuffle=True
-                )
-                vlg = datagen.flow_from_directory(
-                    vp,
-                    target_size=(img_h, img_w),
-                    batch_size=bs,
-                    class_mode="categorical",
-                    shuffle=False
-                )
+                with st.spinner("Preparing data and building model..."):
+                    datagen = ImageDataGenerator(rescale=1.0 / 255)
+                    trg = datagen.flow_from_directory(
+                        tp,
+                        target_size=(img_h, img_w),
+                        batch_size=bs,
+                        class_mode="categorical",
+                        shuffle=True
+                    )
+                    vlg = datagen.flow_from_directory(
+                        vp,
+                        target_size=(img_h, img_w),
+                        batch_size=bs,
+                        class_mode="categorical",
+                        shuffle=False
+                    )
 
                 st.write(f"Found {trg.num_classes} classes in training data: {trg.class_indices}")
                 st.write(f"Found {vlg.num_classes} classes in validation data: {vlg.class_indices}")
@@ -891,9 +950,9 @@ with tab2:
                     model.compile(optimizer=Adam(), loss="categorical_crossentropy", metrics=["accuracy"])
                     st.subheader("CNN Model Summary")
                     model.summary(print_fn=lambda x: st.text(x))
-
-                    st.info("Starting CNN training...")
-                    hist = model.fit(trg, validation_data=vlg, epochs=ep)
+                    
+                    with st.spinner(f"Starting CNN training for {ep} epochs..."):
+                        hist = model.fit(trg, validation_data=vlg, epochs=ep)
                     st.success("CNN Training completed ✅")
 
                     st.subheader("CNN Training History")

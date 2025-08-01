@@ -10,3 +10,4 @@ nbformat
 xlsxwriter
 openpyxl
 xgboost
+shap

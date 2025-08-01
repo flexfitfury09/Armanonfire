@@ -1016,134 +1016,166 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import os, io, json
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor
-from sklearn.linear_model import LinearRegression, LogisticRegression
+import os
+import joblib
+import shap
+import base64
+import json
+import sklearn
+from io import BytesIO
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.naive_bayes import GaussianNB
-from sklearn.neighbors import KNeighborsClassifier
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.cluster import KMeans, DBSCAN, AgglomerativeClustering
-from sklearn.decomposition import PCA
-from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV, cross_val_score, KFold
-from sklearn.metrics import (
-    classification_report, confusion_matrix, accuracy_score,
-    r2_score, mean_squared_error, mean_absolute_error,
-    f1_score, recall_score, precision_score, roc_curve, auc,
-    log_loss
-)
-from sklearn.preprocessing import StandardScaler, LabelEncoder, PolynomialFeatures
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Conv2D, Flatten, LSTM, Embedding, SimpleRNN
-from tensorflow.keras.preprocessing.sequence import pad_sequences
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.image import ImageDataGenerator
-from tensorflow.keras.utils import to_categorical
-import shap
-from joblib import dump, load
+import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="All-in-One AutoML Dashboard", layout="wide")
-st.title("🤖 All-in-One Streamlit AutoML Dashboard")
+st.set_page_config(page_title="🔮 AutoML SaaS App", layout="wide")
 
-st.sidebar.title("🔍 Upload & Configure")
-uploaded_file = st.sidebar.file_uploader("Upload your dataset (CSV)", type=["csv"])
+# -------------------------
+# Simulated User Auth
+# -------------------------
+users = {
+    "admin@gmail.com": "admin123",
+    "user@gmail.com": "123456"
+}
+user_session = {"email": None, "uploads": 0, "trains": 0, "quota_limit": 3}
 
-if uploaded_file is not None:
+def login():
+    st.sidebar.subheader("🔐 Login")
+    email = st.sidebar.text_input("Email")
+    password = st.sidebar.text_input("Password", type="password")
+    if st.sidebar.button("Login"):
+        if email in users and users[email] == password:
+            user_session["email"] = email
+            st.session_state["logged_in"] = True
+        else:
+            st.error("Invalid credentials")
+
+if not st.session_state.get("logged_in", False):
+    login()
+    st.stop()
+
+# -------------------------
+# App Header
+# -------------------------
+st.title("🚀 Advanced AutoML Dashboard (All-in-One)")
+st.markdown("Welcome **{0}**, your quota: {1}/{2}".format(
+    user_session["email"], user_session["trains"], user_session["quota_limit"]
+))
+
+# -------------------------
+# Dataset Upload
+# -------------------------
+st.sidebar.header("📁 Upload Dataset")
+uploaded_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
+if uploaded_file:
+    user_session["uploads"] += 1
     df = pd.read_csv(uploaded_file)
-    st.subheader("📊 Data Preview")
     st.dataframe(df.head())
 
-    st.sidebar.subheader("⚙️ Settings")
-    target_column = st.sidebar.selectbox("Select Target Column", df.columns)
-    task_type = st.sidebar.radio("Task Type", ["Classification", "Regression", "Clustering", "PCA", "Deep Learning"])
+    st.sidebar.success("✅ Dataset uploaded")
 
-    X = df.drop(columns=[target_column]) if target_column in df else df.copy()
-    y = df[target_column] if target_column in df else None
+    # Save user dataset
+    user_folder = f"user_data/{user_session['email'].replace('@', '_')}"
+    os.makedirs(user_folder, exist_ok=True)
+    df.to_csv(f"{user_folder}/uploaded_dataset.csv", index=False)
 
-    # Label Encoding for categorical
-    for col in X.select_dtypes(include='object').columns:
-        le = LabelEncoder()
-        X[col] = le.fit_transform(X[col].astype(str))
+    # Feature & Target
+    st.sidebar.subheader("📊 Feature Selection")
+    target = st.sidebar.selectbox("Select target", df.columns)
+    features = st.sidebar.multiselect("Select features", df.columns.drop(target), default=list(df.columns.drop(target)))
 
-    if y is not None and y.dtypes == 'object':
-        y = LabelEncoder().fit_transform(y.astype(str))
-
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
-
-    if task_type in ["Classification", "Regression"]:
-        X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=0.2, random_state=42)
-
-        st.sidebar.subheader("📈 Choose Algorithm")
-        model_name = st.sidebar.selectbox("Algorithm", [
-            "Logistic Regression", "Random Forest", "SVM", "Naive Bayes", "KNN",
-            "Decision Tree", "Linear Regression", "XGBoost"
-        ])
-
-        def get_model(name):
-            if name == "Logistic Regression": return LogisticRegression()
-            elif name == "Random Forest": return RandomForestClassifier() if task_type == "Classification" else RandomForestRegressor()
-            elif name == "SVM": return SVC(probability=True)
-            elif name == "Naive Bayes": return GaussianNB()
-            elif name == "KNN": return KNeighborsClassifier()
-            elif name == "Decision Tree": return DecisionTreeClassifier()
-            elif name == "Linear Regression": return LinearRegression()
-            elif name == "XGBoost": return XGBClassifier(use_label_encoder=False, eval_metric='logloss') if task_type == "Classification" else XGBRegressor()
-
-        model = get_model(model_name)
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-
-        st.subheader("📊 Evaluation")
-        if task_type == "Classification":
-            st.text("Accuracy: {:.2f}%".format(accuracy_score(y_test, y_pred)*100))
-            st.text("F1 Score: {:.2f}".format(f1_score(y_test, y_pred, average='weighted')))
-            st.text("Precision: {:.2f}".format(precision_score(y_test, y_pred, average='weighted')))
-            st.text("Recall: {:.2f}".format(recall_score(y_test, y_pred, average='weighted')))
+    if st.sidebar.button("🚀 Train Model"):
+        if user_session["trains"] >= user_session["quota_limit"]:
+            st.warning("⚠️ You’ve reached your training quota.")
         else:
-            st.text("R2 Score: {:.2f}".format(r2_score(y_test, y_pred)))
-            st.text("MAE: {:.2f}".format(mean_absolute_error(y_test, y_pred)))
-            st.text("MSE: {:.2f}".format(mean_squared_error(y_test, y_pred)))
+            user_session["trains"] += 1
 
-    elif task_type == "Clustering":
-        st.subheader("🔍 Clustering")
-        n_clusters = st.slider("Number of clusters", 2, 10, 3)
-        model = KMeans(n_clusters=n_clusters)
-        cluster_labels = model.fit_predict(X_scaled)
-        df['Cluster'] = cluster_labels
-        st.dataframe(df.head())
+            # Split Data
+            X, y = df[features], df[target]
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
 
-    elif task_type == "PCA":
-        st.subheader("📉 Principal Component Analysis")
-        n_components = st.slider("Number of components", 2, min(10, X.shape[1]))
-        pca = PCA(n_components=n_components)
-        pca_result = pca.fit_transform(X_scaled)
-        st.write("Explained Variance Ratio:", pca.explained_variance_ratio_)
-        st.write(pd.DataFrame(pca_result, columns=[f"PC{i+1}" for i in range(n_components)]))
+            # Models & Hyperparameter tuning
+            st.subheader("📦 Training Models")
+            base_models = [
+                ('lr', LogisticRegression(max_iter=500)),
+                ('rf', RandomForestClassifier()),
+                ('svc', SVC(probability=True)),
+                ('gnb', GaussianNB())
+            ]
 
-    elif task_type == "Deep Learning":
-        st.subheader("🧠 Build Simple Neural Network")
-        input_dim = X_scaled.shape[1]
-        model = Sequential([
-            Dense(64, activation='relu', input_shape=(input_dim,)),
-            Dense(32, activation='relu'),
-            Dense(1, activation='sigmoid' if len(np.unique(y)) == 2 else 'softmax')
-        ])
-        model.compile(loss='binary_crossentropy' if len(np.unique(y)) == 2 else 'sparse_categorical_crossentropy',
-                      optimizer='adam',
-                      metrics=['accuracy'])
-        history = model.fit(X_scaled, y, epochs=10, batch_size=16, verbose=0)
-        st.success("✅ Model trained.")
-        st.line_chart(history.history['accuracy'])
+            for name, model in base_models:
+                scores = cross_val_score(model, X_train, y_train, cv=5)
+                st.write(f"{name} - Accuracy: {scores.mean():.2f}")
 
-    st.sidebar.subheader("📤 Export Model")
-    if st.sidebar.button("Export Trained Model"):
-        dump(model, 'trained_model.joblib')
-        with open("trained_model.joblib", "rb") as f:
-            st.download_button("Download .joblib", f, file_name="trained_model.joblib")
+            ensemble = VotingClassifier(estimators=base_models, voting='soft')
+            ensemble.fit(X_train, y_train)
+            preds = ensemble.predict(X_test)
+            acc = accuracy_score(y_test, preds)
 
-else:
-    st.warning("Please upload a CSV file to begin.")
+            st.success(f"✅ Final Ensemble Accuracy: {acc:.2f}")
+            st.text(classification_report(y_test, preds))
+
+            # SHAP Explainability
+            st.subheader("🧠 SHAP Explainability")
+            explainer = shap.Explainer(ensemble, X_train)
+            shap_values = explainer(X_test[:100])
+            fig = shap.plots.beeswarm(shap_values, show=False)
+            st.pyplot(fig)
+
+            # Save model
+            joblib.dump(ensemble, f"{user_folder}/model.pkl")
+            pd.DataFrame(classification_report(y_test, preds, output_dict=True)).to_csv(f"{user_folder}/report.csv")
+
+            # Download model
+            with open(f"{user_folder}/model.pkl", "rb") as f:
+                b64 = base64.b64encode(f.read()).decode()
+                href = f'<a href="data:file/pkl;base64,{b64}" download="trained_model.pkl">📥 Download Trained Model</a>'
+                st.markdown(href, unsafe_allow_html=True)
+
+# -------------------------
+# 🔍 ChatGPT + Prompt Helper
+# -------------------------
+st.sidebar.subheader("🧠 AutoPrompt & GPT")
+if st.sidebar.button("Generate Prompt"):
+    st.write("Q: What's the best model for imbalanced data?")
+    st.write("A: Try RandomForest with class_weight='balanced' or XGBoost. Use SMOTE for oversampling.")
+
+# -------------------------
+# ⬇ Download IPython Notebook
+# -------------------------
+if st.sidebar.button("📓 Export Notebook"):
+    nb = {
+        "cells": [{
+            "cell_type": "code",
+            "metadata": {},
+            "source": [
+                "import pandas as pd\n",
+                "from sklearn.ensemble import RandomForestClassifier\n",
+                "df = pd.read_csv('your_dataset.csv')\n",
+                "X = df.drop('target', axis=1)\n",
+                "y = df['target']\n",
+                "model = RandomForestClassifier().fit(X, y)\n",
+                "model.predict(X[:5])"
+            ],
+            "execution_count": None,
+            "outputs": []
+        }],
+        "metadata": {},
+        "nbformat": 4,
+        "nbformat_minor": 2
+    }
+
+    notebook_bytes = BytesIO(json.dumps(nb).encode("utf-8"))
+    b64 = base64.b64encode(notebook_bytes.read()).decode()
+    href = f'<a href="data:application/octet-stream;base64,{b64}" download="automl_export.ipynb">📥 Download Notebook</a>'
+    st.markdown(href, unsafe_allow_html=True)
+
+# -------------------------
+# Footer
+# -------------------------
+st.markdown("---")
+st.caption("Built with ❤️ using Streamlit • AutoML • SHAP • GPT")

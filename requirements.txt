@@ -11,3 +11,5 @@ xlsxwriter
 openpyxl
 xgboost
 shap
+pyrebase4
+python-dotenv

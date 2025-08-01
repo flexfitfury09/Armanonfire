@@ -1017,165 +1017,228 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
-import joblib
-import shap
-import base64
 import json
-import sklearn
+import joblib
+import pyrebase
+import shap
 from io import BytesIO
 from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, VotingClassifier, VotingRegressor
+from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.svm import SVC
-from sklearn.naive_bayes import GaussianNB
-from sklearn.tree import DecisionTreeClassifier
-import matplotlib.pyplot as plt
+from sklearn.metrics import accuracy_score, classification_report, r2_score, mean_squared_error
+import openai
+import datetime
 
-st.set_page_config(page_title="🔮 AutoML SaaS App", layout="wide")
+# ----- CONFIG -----
+st.set_page_config(page_title="All‑In‑One AutoML SaaS", layout="wide")
+BASE = os.path.dirname(__file__)
+USER_DATA_DIR = os.path.join(BASE, "user_data")
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+TRAIN_QUOTA = 5  # per month for free users
 
-# -------------------------
-# Simulated User Auth
-# -------------------------
-users = {
-    "admin@gmail.com": "admin123",
-    "user@gmail.com": "123456"
-}
-user_session = {"email": None, "uploads": 0, "trains": 0, "quota_limit": 3}
+# ----- FIREBASE SETUP -----
+firebase_config = json.load(open(os.path.join(BASE, "firebase_config.json")))
+firebase = pyrebase.initialize_app(firebase_config)
+auth = firebase.auth()
+db = firebase.database()
+
+# ----- SESSION INIT -----
+if "uid" not in st.session_state:
+    st.session_state.uid = None
+    st.session_state.role = None
+    st.session_state.email = None
+
+# ----- AUTH PAGES -----
+def signup():
+    st.sidebar.header("📧 Sign Up")
+    email = st.sidebar.text_input("Email", key="su_e")
+    pw = st.sidebar.text_input("Password", type="password", key="su_p")
+    if st.sidebar.button("Sign Up"):
+        try:
+            user = auth.create_user_with_email_and_password(email, pw)
+            uid = user["localId"]
+            db.child("users").child(uid).set({"email": email, "role": "user", "quota": TRAIN_QUOTA, "usage_month": 0, "month": datetime.date.today().month})
+            st.success("Registered! Please sign in.")
+        except Exception as e:
+            st.error("Error: " + str(e))
 
 def login():
-    st.sidebar.subheader("🔐 Login")
-    email = st.sidebar.text_input("Email")
-    password = st.sidebar.text_input("Password", type="password")
-    if st.sidebar.button("Login"):
-        if email in users and users[email] == password:
-            user_session["email"] = email
-            st.session_state["logged_in"] = True
+    st.sidebar.header("🔐 Sign In")
+    email = st.sidebar.text_input("Email", key="li_e")
+    pw = st.sidebar.text_input("Password", type="password", key="li_p")
+    if st.sidebar.button("Sign In"):
+        try:
+            user = auth.sign_in_with_email_and_password(email, pw)
+            uid = user["localId"]
+            st.session_state.uid = uid
+            st.session_state.email = email
+            profile = db.child("users").child(uid).get().val()
+            st.session_state.role = profile.get("role", "user")
+        except Exception as e:
+            st.error("Login failed: " + str(e))
+
+def logout():
+    st.session_state.uid = None
+    st.session_state.email = None
+    st.session_state.role = None
+    st.experimental_rerun()
+
+# ----- AI ASSISTANT -----
+def gpt_assist(prompt):
+    openai.api_key = st.secrets.get("OPENAI_API_KEY", "")
+    resp = openai.Completion.create(
+        engine="text-davinci-003", prompt=prompt, max_tokens=150
+    )
+    return resp.choices[0].text.strip()
+
+def assistant_ui():
+    st.sidebar.header("🤖 AI Assistant")
+    q = st.sidebar.text_input("Ask a question")
+    if st.sidebar.button("Send"):
+        if q:
+            ans = gpt_assist(q)
+            st.sidebar.success(ans)
+
+# ----- ADMIN DASHBOARD -----
+def admin_panel():
+    st.subheader("🔧 Admin Dashboard")
+    users = db.child("users").get().each() or []
+    df = pd.DataFrame([{"uid":u.key(), **u.val()} for u in users])
+    st.dataframe(df[["email","role","quota","usage_month","month"]])
+    uid = st.text_input("Reset quota for UID")
+    if st.button("Reset Quota"):
+        if uid in [u.key() for u in users]:
+            db.child("users").child(uid).update({"usage_month":0, "month":datetime.date.today().month})
+            st.success("Reset done")
         else:
-            st.error("Invalid credentials")
+            st.error("UID not found")
 
-if not st.session_state.get("logged_in", False):
-    login()
-    st.stop()
+# ----- APPLICATION -----
+def user_app():
+    st.subheader(f"Welcome, {st.session_state.email} ({st.session_state.role})")
+    profile = db.child("users").child(st.session_state.uid).get().val()
+    # reset monthly usage if needed
+    if profile["month"] != datetime.date.today().month:
+        db.child("users").child(st.session_state.uid).update({"usage_month":0, "month":datetime.date.today().month})
+        profile["usage_month"] = 0
 
-# -------------------------
-# App Header
-# -------------------------
-st.title("🚀 Advanced AutoML Dashboard (All-in-One)")
-st.markdown("Welcome **{0}**, your quota: {1}/{2}".format(
-    user_session["email"], user_session["trains"], user_session["quota_limit"]
-))
+    st.info(f"Quota: {profile['usage_month']}/{profile['quota']} trainings this month")
 
-# -------------------------
-# Dataset Upload
-# -------------------------
-st.sidebar.header("📁 Upload Dataset")
-uploaded_file = st.sidebar.file_uploader("Upload CSV", type=["csv"])
-if uploaded_file:
-    user_session["uploads"] += 1
-    df = pd.read_csv(uploaded_file)
-    st.dataframe(df.head())
+    df = None
+    uploaded = st.file_uploader("Upload CSV dataset", type=["csv"])
+    if uploaded:
+        df = pd.read_csv(uploaded)
+        st.dataframe(df.head())
+        # save dataset
+        folder = os.path.join(USER_DATA_DIR, st.session_state.uid)
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, f"dataset_{datetime.datetime.now().timestamp():.0f}.csv")
+        df.to_csv(path, index=False)
 
-    st.sidebar.success("✅ Dataset uploaded")
+    if df is not None:
+        cols = df.columns.tolist()
+        target = st.selectbox("Select target", cols)
+        features = st.multiselect("Select features", [c for c in cols if c != target], default=[c for c in cols if c != target])
+        task = st.selectbox("Task type", ["Classification","Regression"])
+        model_type = st.selectbox("Model", ["RandomForest","LogisticRegression","SVM","VotingEnsemble"])
+        hyper = st.checkbox("Enable hyperparameter search")
+        cv = st.checkbox("Enable cross‑validation (5‑fold)")
+        if st.button("Train model"):
+            if profile["usage_month"] >= profile["quota"]:
+                st.error("Quota exceeded this month.")
+            else:
+                X = df[features]
+                y = df[target]
+                for c in X.select_dtypes(include="object"):
+                    X[c] = LabelEncoder().fit_transform(X[c].astype(str))
+                if y.dtype == object:
+                    y = LabelEncoder().fit_transform(y.astype(str))
+                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-    # Save user dataset
-    user_folder = f"user_data/{user_session['email'].replace('@', '_')}"
-    os.makedirs(user_folder, exist_ok=True)
-    df.to_csv(f"{user_folder}/uploaded_dataset.csv", index=False)
+                # select model
+                if task=="Classification":
+                    if model_type=="RandomForest":
+                        model = RandomForestClassifier()
+                    elif model_type=="LogisticRegression":
+                        model = LogisticRegression(max_iter=500)
+                    elif model_type=="SVM":
+                        model = SVC(probability=True)
+                    else:
+                        # voting
+                        models = [
+                          ("lr",LogisticRegression(max_iter=500)),
+                          ("rf",RandomForestClassifier()),
+                          ("svc",SVC(probability=True))
+                        ]
+                        model = VotingClassifier(models, voting="soft")
+                else:
+                    model = RandomForestRegressor()
 
-    # Feature & Target
-    st.sidebar.subheader("📊 Feature Selection")
-    target = st.sidebar.selectbox("Select target", df.columns)
-    features = st.sidebar.multiselect("Select features", df.columns.drop(target), default=list(df.columns.drop(target)))
+                if hyper:
+                    grid = GridSearchCV(model, param_grid={}, cv=3)
+                    grid.fit(X_train, y_train)
+                    model = grid.best_estimator_
 
-    if st.sidebar.button("🚀 Train Model"):
-        if user_session["trains"] >= user_session["quota_limit"]:
-            st.warning("⚠️ You’ve reached your training quota.")
-        else:
-            user_session["trains"] += 1
+                model.fit(X_train, y_train)
+                preds = model.predict(X_test)
+                if task=="Classification":
+                    st.write("Accuracy:", accuracy_score(y_test, preds))
+                    st.text(classification_report(y_test, preds))
+                else:
+                    st.write("R²:", r2_score(y_test, preds))
+                    st.write("RMSE:", mean_squared_error(y_test, preds, squared=False))
 
-            # Split Data
-            X, y = df[features], df[target]
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)
+                if cv:
+                    scores = cross_val_score(model, X, y, cv=5)
+                    st.write("CV mean:", np.mean(scores))
 
-            # Models & Hyperparameter tuning
-            st.subheader("📦 Training Models")
-            base_models = [
-                ('lr', LogisticRegression(max_iter=500)),
-                ('rf', RandomForestClassifier()),
-                ('svc', SVC(probability=True)),
-                ('gnb', GaussianNB())
-            ]
+                # SHAP
+                explainer = shap.Explainer(model, X_train)
+                shap_values = explainer(X_test[:100])
+                st.subheader("SHAP Summary Plot")
+                fig = shap.plots.beeswarm(shap_values, show=False)
+                st.pyplot(fig)
 
-            for name, model in base_models:
-                scores = cross_val_score(model, X_train, y_train, cv=5)
-                st.write(f"{name} - Accuracy: {scores.mean():.2f}")
+                # save model & report
+                folder = os.path.join(USER_DATA_DIR, st.session_state.uid)
+                os.makedirs(folder, exist_ok=True)
+                ts = int(datetime.datetime.now().timestamp())
+                mpath = os.path.join(folder, f"model_{ts}.pkl")
+                joblib.dump(model, mpath)
+                rpt = os.path.join(folder, f"report_{ts}.csv")
+                pd.DataFrame(classification_report(y_test, preds, output_dict=True)).T.to_csv(rpt)
 
-            ensemble = VotingClassifier(estimators=base_models, voting='soft')
-            ensemble.fit(X_train, y_train)
-            preds = ensemble.predict(X_test)
-            acc = accuracy_score(y_test, preds)
+                # update usage
+                profile["usage_month"] += 1
+                db.child("users").child(st.session_state.uid).update({"usage_month": profile["usage_month"]})
 
-            st.success(f"✅ Final Ensemble Accuracy: {acc:.2f}")
-            st.text(classification_report(y_test, preds))
+                st.download_button("⬇ Download Model", open(mpath,"rb"), file_name="model.pkl")
+                st.download_button("⬇ Download Report (CSV)", open(rpt,"rb"), file_name="report.csv")
 
-            # SHAP Explainability
-            st.subheader("🧠 SHAP Explainability")
-            explainer = shap.Explainer(ensemble, X_train)
-            shap_values = explainer(X_test[:100])
-            fig = shap.plots.beeswarm(shap_values, show=False)
-            st.pyplot(fig)
+                # export notebook
+                nb = {
+                  "cells": [{"cell_type":"code","metadata":{},"source":[
+                      "import pandas as pd","df = pd.read_csv('your_dataset.csv')",
+                      "# load model and predict"]}],
+                  "metadata":{}, "nbformat":4, "nbformat_minor":2
+                }
+                nb_bytes = BytesIO(json.dumps(nb).encode())
+                st.download_button("📘 Download Notebook", nb_bytes, file_name="training_notebook.ipynb")
 
-            # Save model
-            joblib.dump(ensemble, f"{user_folder}/model.pkl")
-            pd.DataFrame(classification_report(y_test, preds, output_dict=True)).to_csv(f"{user_folder}/report.csv")
+def main():
+    st.sidebar.title("Navigation")
+    if st.session_state.uid:
+        st.sidebar.button("Logout", on_click=logout)
+        assistant_ui()
+        if st.session_state.role == "admin":
+            st.sidebar.button("Admin Dashboard", on_click=lambda: None)
+            if st.sidebar.button("View Admin Panel"):
+                admin_panel()
+        user_app()
+    else:
+        signup()
+        login()
 
-            # Download model
-            with open(f"{user_folder}/model.pkl", "rb") as f:
-                b64 = base64.b64encode(f.read()).decode()
-                href = f'<a href="data:file/pkl;base64,{b64}" download="trained_model.pkl">📥 Download Trained Model</a>'
-                st.markdown(href, unsafe_allow_html=True)
-
-# -------------------------
-# 🔍 ChatGPT + Prompt Helper
-# -------------------------
-st.sidebar.subheader("🧠 AutoPrompt & GPT")
-if st.sidebar.button("Generate Prompt"):
-    st.write("Q: What's the best model for imbalanced data?")
-    st.write("A: Try RandomForest with class_weight='balanced' or XGBoost. Use SMOTE for oversampling.")
-
-# -------------------------
-# ⬇ Download IPython Notebook
-# -------------------------
-if st.sidebar.button("📓 Export Notebook"):
-    nb = {
-        "cells": [{
-            "cell_type": "code",
-            "metadata": {},
-            "source": [
-                "import pandas as pd\n",
-                "from sklearn.ensemble import RandomForestClassifier\n",
-                "df = pd.read_csv('your_dataset.csv')\n",
-                "X = df.drop('target', axis=1)\n",
-                "y = df['target']\n",
-                "model = RandomForestClassifier().fit(X, y)\n",
-                "model.predict(X[:5])"
-            ],
-            "execution_count": None,
-            "outputs": []
-        }],
-        "metadata": {},
-        "nbformat": 4,
-        "nbformat_minor": 2
-    }
-
-    notebook_bytes = BytesIO(json.dumps(nb).encode("utf-8"))
-    b64 = base64.b64encode(notebook_bytes.read()).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="automl_export.ipynb">📥 Download Notebook</a>'
-    st.markdown(href, unsafe_allow_html=True)
-
-# -------------------------
-# Footer
-# -------------------------
-st.markdown("---")
-st.caption("Built with ❤️ using Streamlit • AutoML • SHAP • GPT")
+if __name__ == "__main__":
+    main()

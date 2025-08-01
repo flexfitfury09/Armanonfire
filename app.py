@@ -378,12 +378,12 @@ st.set_page_config(page_title="Advanced AutoML Dashboard", layout="wide")
 st.title("📊 Advanced AutoML Dashboard for Tabular Data")
 
 # --- Helper Functions ---
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Loading data...")
 def load_data(csv_file):
     """Loads CSV data and caches it."""
     return pd.read_csv(csv_file)
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Cleaning and preparing data...")
 def clean_prepare(df, target, is_class, impute_strategy_num):
     """
     Cleans and prepares the DataFrame for machine learning.
@@ -395,6 +395,11 @@ def clean_prepare(df, target, is_class, impute_strategy_num):
     # Special handling for 'TotalCharges'
     if 'TotalCharges' in X.columns:
         X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')
+        # Fill NA after conversion
+        if impute_strategy_num == "Mean":
+            X['TotalCharges'] = X['TotalCharges'].fillna(X['TotalCharges'].mean())
+        else:
+            X['TotalCharges'] = X['TotalCharges'].fillna(X['TotalCharges'].median())
 
     # Imputation for numerical features
     num_cols = X.select_dtypes(include=np.number).columns
@@ -487,22 +492,18 @@ def generate_notebook(code_string):
     return nb
 
 # --- Main App Logic ---
-st.header("📊 Tabular Data Analysis & Modeling")
+st.header("📊 Advanced AutoML Dashboard for Tabular Data")
 csv = st.file_uploader("Upload CSV", type=["csv"])
 
 # Initialize session state for caching results
-if 'le_classes' not in st.session_state:
-    st.session_state['le_classes'] = None
-if 'metrics' not in st.session_state:
-    st.session_state['metrics'] = {}
-if 'model' not in st.session_state:
-    st.session_state['model'] = None
-if 'trained' not in st.session_state:
-    st.session_state['trained'] = False
-if 'X' not in st.session_state:
-    st.session_state['X'] = None
-if 'y' not in st.session_state:
-    st.session_state['y'] = None
+if 'le_classes' not in st.session_state: st.session_state['le_classes'] = None
+if 'metrics' not in st.session_state: st.session_state['metrics'] = {}
+if 'model' not in st.session_state: st.session_state['model'] = None
+if 'trained' not in st.session_state: st.session_state['trained'] = False
+if 'X' not in st.session_state: st.session_state['X'] = None
+if 'y' not in st.session_state: st.session_state['y'] = None
+if 'X_test' not in st.session_state: st.session_state['X_test'] = None
+if 'y_test' not in st.session_state: st.session_state['y_test'] = None
 
 if csv:
     df = load_data(csv)
@@ -516,11 +517,6 @@ if csv:
         st.write(df.dtypes)
         st.subheader("Missing Values Count")
         st.write(df.isnull().sum())
-
-        st.subheader("Value Counts for Categorical Features")
-        for col in df.select_dtypes(include=['object', 'category']).columns:
-            st.write(f"**{col}**:")
-            st.write(df[col].value_counts())
 
         st.subheader("Distribution of Numerical Features")
         numerical_cols = df.select_dtypes(include=np.number).columns.tolist()
@@ -623,27 +619,31 @@ if csv:
                 st.session_state['trained'] = False
                 st.session_state['metrics'] = {}
                 st.session_state['model'] = None
+                st.session_state['X_test'] = None
+                st.session_state['y_test'] = None
 
                 with st.spinner(f"Training {selected_model_name}... This may take a while."):
                     metrics = {}
                     
                     if not cross_val_active:
                         X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size=test_size/100, random_state=42)
-                        
+                        st.session_state['X_test'] = X_test
+                        st.session_state['y_test'] = y_test
+
                         if search_method == "GridSearch":
-                            st.info("Starting GridSearchCV...")
-                            gs = GridSearchCV(model, custom_params, cv=3, n_jobs=1, verbose=1)
-                            gs.fit(X_train, y_train)
-                            model = gs.best_estimator_
-                            st.success(f"Best parameters found by GridSearchCV: {gs.best_params_}")
-                            st.write(f"Best score: {gs.best_score_:.4f}")
+                            with st.spinner("Starting GridSearchCV..."):
+                                gs = GridSearchCV(model, custom_params, cv=3, n_jobs=1, verbose=1)
+                                gs.fit(X_train, y_train)
+                                model = gs.best_estimator_
+                                st.success(f"Best parameters found by GridSearchCV: {gs.best_params_}")
+                                st.write(f"Best score: {gs.best_score_:.4f}")
                         elif search_method == "RandomSearch":
-                            st.info("Starting RandomizedSearchCV...")
-                            rs = RandomizedSearchCV(model, custom_params, n_iter=10, cv=3, n_jobs=1, random_state=42, verbose=1)
-                            rs.fit(X_train, y_train)
-                            model = rs.best_estimator_
-                            st.success(f"Best parameters found by RandomizedSearchCV: {rs.best_params_}")
-                            st.write(f"Best score: {rs.best_score_:.4f}")
+                            with st.spinner("Starting RandomizedSearchCV..."):
+                                rs = RandomizedSearchCV(model, custom_params, n_iter=10, cv=3, n_jobs=1, random_state=42, verbose=1)
+                                rs.fit(X_train, y_train)
+                                model = rs.best_estimator_
+                                st.success(f"Best parameters found by RandomizedSearchCV: {rs.best_params_}")
+                                st.write(f"Best score: {rs.best_score_:.4f}")
                         else:
                             model.fit(X_train, y_train)
                         
@@ -658,9 +658,9 @@ if csv:
                             metrics = {
                                 "Train Accuracy": accuracy_score(y_train, pred_train),
                                 "Test Accuracy": accuracy_score(y_test, pred_test),
-                                "F1 Score (Weighted)": f1_score(y_test, pred_test, average='weighted'),
-                                "Recall Score (Weighted)": recall_score(y_test, pred_test, average='weighted'),
-                                "Precision Score (Weighted)": precision_score(y_test, pred_test, average='weighted')
+                                "F1 Score (Weighted)": f1_score(y_test, pred_test, average='weighted', zero_division=0),
+                                "Recall Score (Weighted)": recall_score(y_test, pred_test, average='weighted', zero_division=0),
+                                "Precision Score (Weighted)": precision_score(y_test, pred_test, average='weighted', zero_division=0)
                             }
                             if hasattr(model, "predict_proba"):
                                 try:
@@ -674,7 +674,7 @@ if csv:
 
                             st.json(metrics)
                             st.subheader("Classification Report")
-                            report = classification_report(y_test, pred_test, target_names=st.session_state.get('le_classes'))
+                            report = classification_report(y_test, pred_test, target_names=st.session_state.get('le_classes'), zero_division=0)
                             st.text(report)
 
                             st.subheader("Confusion Matrix")
@@ -713,25 +713,24 @@ if csv:
                             st.pyplot(fig_reg)
                     
                     else: # Cross-Validation
-                        st.info(f"Running {n_splits}-fold cross-validation...")
-                        kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
-                        
-                        if is_class:
-                            cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='accuracy', n_jobs=1)
-                            st.write(f"Cross-Validation Accuracy Scores: {cv_scores}")
-                            st.success(f"Average Accuracy: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
-                            metrics = {"Average CV Accuracy": np.mean(cv_scores), "CV Std Dev": np.std(cv_scores)}
+                        with st.spinner(f"Running {n_splits}-fold cross-validation..."):
+                            kf = KFold(n_splits=n_splits, shuffle=True, random_state=42)
+                            
+                            if is_class:
+                                cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='accuracy', n_jobs=1)
+                                st.write(f"Cross-Validation Accuracy Scores: {cv_scores}")
+                                st.success(f"Average Accuracy: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
+                                metrics = {"Average CV Accuracy": np.mean(cv_scores), "CV Std Dev": np.std(cv_scores)}
 
-                        else:
-                            cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='r2', n_jobs=1)
-                            cv_mse = -cross_val_score(model, X_scaled, y, cv=kf, scoring='neg_mean_squared_error', n_jobs=1)
-                            st.write(f"Cross-Validation R² Scores: {cv_scores}")
-                            st.write(f"Cross-Validation MSE Scores: {cv_mse}")
-                            st.success(f"Average R²: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
-                            metrics = {"Average CV R²": np.mean(cv_scores), "CV R² Std Dev": np.std(cv_scores), "Average CV MSE": np.mean(cv_mse)}
-                        
-                        st.info("Detailed plots are not available with cross-validation as there is no single test set.")
-
+                            else:
+                                cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='r2', n_jobs=1)
+                                cv_mse = -cross_val_score(model, X_scaled, y, cv=kf, scoring='neg_mean_squared_error', n_jobs=1)
+                                st.write(f"Cross-Validation R² Scores: {cv_scores}")
+                                st.write(f"Cross-Validation MSE Scores: {cv_mse}")
+                                st.success(f"Average R²: {np.mean(cv_scores):.4f} (Standard Deviation: {np.std(cv_scores):.4f})")
+                                metrics = {"Average CV R²": np.mean(cv_scores), "CV R² Std Dev": np.std(cv_scores), "Average CV MSE": np.mean(cv_mse)}
+                            
+                            st.info("Detailed plots are not available with cross-validation as there is no single test set.")
 
                     # Common output section after both CV and train-test split
                     if hasattr(model, 'feature_importances_') and selected_model_name not in ["SVC", "LinearRegression", "LogisticRegression"]:
@@ -759,32 +758,44 @@ if csv:
 
 if st.session_state['trained']:
     st.subheader("4. Model Explainability (SHAP)")
-    if "X_test" in locals() and "y_test" in locals() and selected_model_name not in ["VotingClassifier", "VotingRegressor", "SVC", "LinearRegression"]:
+    if st.session_state.get('X_test') is not None and st.session_state.get('y_test') is not None and \
+       selected_model_name not in ["VotingClassifier", "VotingRegressor", "SVC", "LinearRegression"]:
+        
+        st.write("SHAP can be very memory-intensive. Consider a smaller sample size for large datasets.")
+        shap_sample_size = st.slider("Select SHAP sample size", 1, min(1000, len(st.session_state['X_test'])), 100)
+        X_test_sample = st.session_state['X_test'].sample(n=shap_sample_size, random_state=42)
+        
         try:
-            with st.spinner("Calculating SHAP values... This may take time for large datasets."):
-                explainer = shap.Explainer(st.session_state['model'])
-                shap_values = explainer.shap_values(X_test)
+            with st.spinner(f"Calculating SHAP values for {shap_sample_size} samples..."):
+                if "XGB" in selected_model_name or "RandomForest" in selected_model_name:
+                    explainer = shap.TreeExplainer(st.session_state['model'])
+                else:
+                    explainer = shap.Explainer(st.session_state['model'].predict, X_test_sample)
+
+                shap_values = explainer.shap_values(X_test_sample)
                 
                 st.write("SHAP Summary Plot")
                 fig_shap, ax_shap = plt.subplots(figsize=(10, 6))
                 if is_class:
-                    shap.summary_plot(shap_values[1], X_test, show=False)
+                    shap.summary_plot(shap_values[1], X_test_sample, show=False)
                 else:
-                    shap.summary_plot(shap_values, X_test, show=False)
+                    shap.summary_plot(shap_values, X_test_sample, show=False)
                 st.pyplot(fig_shap)
 
                 st.write("SHAP Waterfall Plot for a single prediction")
-                sample_index = st.slider("Select a test sample to explain", 0, len(X_test)-1, 0)
+                sample_index = st.slider("Select a test sample to explain", 0, len(X_test_sample)-1, 0)
                 fig_waterfall, ax_waterfall = plt.subplots(figsize=(10, 6))
                 if is_class:
-                    shap_obj = explainer(X_test)
+                    shap_obj = explainer(X_test_sample)
                     shap.plots.waterfall(shap_obj[sample_index, :, 1], show=False)
                 else:
-                    shap_obj = explainer(X_test)
+                    shap_obj = explainer(X_test_sample)
                     shap.plots.waterfall(shap_obj[sample_index], show=False)
                 st.pyplot(fig_waterfall)
+
         except Exception as e:
-            st.warning(f"Could not generate SHAP plots: {e}. SHAP is not supported for this model or with this configuration.")
+            st.warning(f"Could not generate SHAP plots: {e}. SHAP is not supported for this model or with this configuration. Try adjusting the sample size.")
+            st.info("SHAP is not supported for Voting Classifiers/Regressors or SVC.")
     else:
         st.info("SHAP plots are available for most models with a defined test set. They are not currently supported for Voting Classifiers/Regressors or SVC.")
 
@@ -810,7 +821,6 @@ if st.session_state['trained']:
     )
 
     # Download Jupyter Notebook
-    # The logic to build the notebook code has been significantly improved.
     notebook_code_lines = [
         "import pandas as pd", "import numpy as np", "import matplotlib.pyplot as plt", "import seaborn as sns",
         "from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV, KFold",
@@ -835,9 +845,14 @@ if st.session_state['trained']:
         "# Special handling for 'TotalCharges'",
         "if 'TotalCharges' in X.columns:",
         "    X['TotalCharges'] = pd.to_numeric(X['TotalCharges'], errors='coerce')",
+        "    # Fill NA after conversion",
+        f"    impute_strategy_num = '{impute_strategy_num}'",
+        "    if impute_strategy_num == 'Mean':",
+        "        X['TotalCharges'] = X['TotalCharges'].fillna(X['TotalCharges'].mean())",
+        "    else:",
+        "        X['TotalCharges'] = X['TotalCharges'].fillna(X['TotalCharges'].median())",
         "",
         "# Imputation for numerical features",
-        f"impute_strategy_num = '{impute_strategy_num}'",
         "num_cols = X.select_dtypes(include=np.number).columns",
         "if impute_strategy_num == 'Mean':",
         "    X[num_cols] = X[num_cols].fillna(X[num_cols].mean())",
@@ -923,7 +938,7 @@ if st.session_state['trained']:
     if search_method == "GridSearch":
         notebook_code_lines.extend([
             f"# --- Hyperparameter Tuning (GridSearchCV) ---",
-            f"params = {custom_params}",
+            f"params = {json.dumps(custom_params)}",
             "print('Running GridSearchCV...')",
             f"X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size={test_size/100}, random_state=42)",
             "gs = GridSearchCV(model, params, cv=3, n_jobs=-1, verbose=1)",
@@ -936,7 +951,7 @@ if st.session_state['trained']:
     elif search_method == "RandomSearch":
         notebook_code_lines.extend([
             f"# --- Hyperparameter Tuning (RandomizedSearchCV) ---",
-            f"params = {custom_params}",
+            f"params = {json.dumps(custom_params)}",
             "print('Running RandomizedSearchCV...')",
             f"X_train, X_test, y_train, y_test = train_test_split(X_scaled, y, test_size={test_size/100}, random_state=42)",
             "rs = RandomizedSearchCV(model, params, n_iter=10, cv=3, n_jobs=-1, random_state=42, verbose=1)",
@@ -946,23 +961,7 @@ if st.session_state['trained']:
             "print(f'Best score: {rs.best_score_:.4f}')",
             "",
         ])
-
-    if cross_val_active:
-        notebook_code_lines.extend([
-            f"# --- K-Fold Cross-Validation ---",
-            f"print(f'Running {n_splits}-fold cross-validation...')",
-            f"kf = KFold(n_splits={n_splits}, shuffle=True, random_state=42)",
-            "if is_classification_problem:",
-            "    cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='accuracy', n_jobs=-1)",
-            "    print('Cross-Validation Accuracy Scores:', cv_scores)",
-            "    print(f'Average Accuracy: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
-            "else:",
-            "    cv_scores = cross_val_score(model, X_scaled, y, cv=kf, scoring='r2', n_jobs=-1)",
-            "    print('Cross-Validation R² Scores:', cv_scores)",
-            "    print(f'Average R²: {np.mean(cv_scores):.4f} (Std Dev: {np.std(cv_scores):.4f})')",
-            "",
-        ])
-    else:
+    else: # No hyperparameter search
         notebook_code_lines.extend([
             f"# --- Train-Test Split & Final Evaluation ---",
             f"test_split_ratio = {test_size/100}",
@@ -971,24 +970,27 @@ if st.session_state['trained']:
             "model.fit(X_train, y_train)",
             "pred_test = model.predict(X_test)",
             "",
-            "print('\\nFinal Model Evaluation on Test Set:')",
-            "if is_classification_problem:",
-            "    print('Test Accuracy:', accuracy_score(y_test, pred_test))",
-            "    print('F1 Score (Weighted):', f1_score(y_test, pred_test, average='weighted'))",
-            "    print('\\nClassification Report:')",
-            "    print(classification_report(y_test, pred_test, target_names=le.classes_ if le else None))",
-            "else:",
-            "    print('Test R²:', r2_score(y_test, pred_test))",
-            "    print('MAE (Mean Absolute Error):', mean_absolute_error(y_test, pred_test))",
-            "    print('RMSE (Root Mean Squared Error):', np.sqrt(mean_squared_error(y_test, pred_test)))",
-            "",
-            "if hasattr(model, 'feature_importances_'):",
-            "    feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)",
-            "    print('\\nFeature Importance (Top 10):')",
-            "    print(feature_importance.head(10))",
-            "",
         ])
-    
+
+    notebook_code_lines.extend([
+        "print('\\nFinal Model Evaluation on Test Set:')",
+        "if is_classification_problem:",
+        "    print('Test Accuracy:', accuracy_score(y_test, pred_test))",
+        "    print('F1 Score (Weighted):', f1_score(y_test, pred_test, average='weighted', zero_division=0))",
+        "    print('\\nClassification Report:')",
+        "    print(classification_report(y_test, pred_test, target_names=le.classes_ if le else None, zero_division=0))",
+        "else:",
+        "    print('Test R²:', r2_score(y_test, pred_test))",
+        "    print('MAE (Mean Absolute Error):', mean_absolute_error(y_test, pred_test))",
+        "    print('RMSE (Root Mean Squared Error):', np.sqrt(mean_squared_error(y_test, pred_test)))",
+        "",
+        "if hasattr(model, 'feature_importances_'):",
+        "    feature_importance = pd.DataFrame({'feature': X.columns, 'importance': model.feature_importances_}).sort_values('importance', ascending=False)",
+        "    print('\\nFeature Importance (Top 10):')",
+        "    print(feature_importance.head(10))",
+        "",
+    ])
+
     notebook_code_str = "\n".join(notebook_code_lines)
     nb = generate_notebook(notebook_code_str)
     
